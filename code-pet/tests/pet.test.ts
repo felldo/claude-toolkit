@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { RenderPropsOf } from 'claude-code'
 
 import { BUSY_LOAD, FRANTIC_LOAD, SLEEPY_AFTER_MS, draw, moodFor, pickIdle } from '../hooks/pet'
+import { H, ROWS, W, paint, toCells } from '../hooks/pixels'
 
 const BAND = {
   plugin: 'code-pet',
@@ -57,6 +58,7 @@ describe('band', () => {
     for (const surface of ['terminal', 'desktop'] as const) {
       const ui = await $.ui.mount({ ...BAND, surface })
       expect(await ui.find({ type: 'Text', text: /Rex/ })).toBeDefined()
+      expect(await ui.find({ type: 'Raster' })).toEqual(surface === 'terminal' ? expect.anything() : undefined)
       await ui.unmount()
     }
 
@@ -91,5 +93,20 @@ describe('band', () => {
     const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
     expect(await ui.find({ type: 'Text', text: /Biscuit/ })).toBeUndefined()
     await ui.unmount()
+  })
+})
+
+describe('pixels', () => {
+  test('every species and mood packs into a full raster', () => {
+    const moods = ['sit', 'sleep', 'purr', 'groom', 'play', 'watch', 'busy', 'frantic', 'startled', 'happy', 'perk'] as const
+    for (const species of ['cat', 'dog', 'pikachu'] as const) {
+      for (const mood of moods) {
+        for (const frame of [0, 1, 7, 13]) {
+          const canvas = paint(species, mood, frame)
+          expect(canvas).toHaveLength(H)
+          expect(toCells(canvas)).toHaveLength((W * ROWS * 12 * 4) / 3)
+        }
+      }
+    }
   })
 })

@@ -3,6 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { PetConfig, PetEvent, PetIdle, PetTick, Species } from '../types'
 import { LOAD_WINDOW_MS, MOOD_COLOR, draw, idleDurationMs, moodFor, pickIdle } from './pet'
+import { ROWS, W, paint, toCells } from './pixels'
 
 const FRAME_MS = 500
 const STORE_KEY = 'config'
@@ -141,6 +142,23 @@ export const register: Register = on => {
     const art = draw(cfg.species, mood, t.frame, cfg.name)
     const color = MOOD_COLOR[mood] ?? (cfg.species === 'pikachu' ? 'yellow' : undefined)
     const meter = '▮'.repeat(Math.min(t.load, 12)) + '▯'.repeat(Math.max(0, 12 - t.load))
+    // Pixel art where the terminal has room for it; text art everywhere else.
+    const hasRoom = e.props.maxRows >= ROWS && e.props.bodyColumns >= W + 30
+    if (e.surface === 'terminal' && hasRoom) {
+      const { Box, Text, Raster } = $.ui.resolve(e)
+      return (
+        <Box flexDirection="row">
+          <Raster key="pet" columns={W} rows={ROWS} cells={toCells(paint(cfg.species, mood, t.frame))} />
+          <Box flexDirection="column" justifyContent="center" paddingLeft={1}>
+            <Text bold>{art.caption}</Text>
+            <Text dimColor>
+              workload {meter} {t.load} tools/30s
+            </Text>
+          </Box>
+        </Box>
+      )
+    }
+
     const { Box, Text } = $.ui.resolve(e)
 
     return (
