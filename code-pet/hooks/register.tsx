@@ -38,6 +38,8 @@ export const register: Register = on => {
   // Timestamps of recent tool calls; a reload just resets the workload meter.
   let toolCalls: number[] = []
   let lastWorkAt = 0
+  // The band's last measured size, for /pet to explain which art it drew.
+  let lastBand: { surface: string; rows: number; columns: number } | null = null
 
   on('session.start', async ($, e, next) => {
     const stored = (await $.store.get(STORE_KEY)) as Partial<PetConfig> | undefined
@@ -122,7 +124,10 @@ export const register: Register = on => {
       idle: (await read($, idle)).activity,
       now: t.now,
     })
-    return { text: `${draw(cfg.species, mood, t.frame, cfg.name).caption}.\n\n${HELP}` }
+    const band = lastBand
+      ? `Band: ${lastBand.rows} rows x ${lastBand.columns} cols on ${lastBand.surface}; pixel art needs ${ROWS} x ${W} on the terminal.`
+      : 'Band: not drawn yet.'
+    return { text: `${draw(cfg.species, mood, t.frame, cfg.name).caption}.\n${band}\n\n${HELP}` }
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -143,12 +148,18 @@ export const register: Register = on => {
     const color = MOOD_COLOR[mood] ?? (cfg.species === 'pikachu' ? 'yellow' : undefined)
     const meter = '▮'.repeat(Math.min(t.load, 12)) + '▯'.repeat(Math.max(0, 12 - t.load))
     // Pixel art where the terminal has room for it; text art everywhere else.
-    const hasRoom = e.props.maxRows >= ROWS && e.props.bodyColumns >= W + 30
+    const { maxRows, bodyColumns } = e.props
+    lastBand = { surface: e.surface, rows: maxRows, columns: bodyColumns }
+    const hasRoom = maxRows >= ROWS && bodyColumns >= W
     if (e.surface === 'terminal' && hasRoom) {
       const { Box, Text, Raster } = $.ui.resolve(e)
+      const raster = <Raster key="pet" columns={W} rows={ROWS} cells={toCells(paint(cfg.species, mood, t.frame))} />
+      if (bodyColumns < W + 30) {
+        return raster
+      }
       return (
         <Box flexDirection="row">
-          <Raster key="pet" columns={W} rows={ROWS} cells={toCells(paint(cfg.species, mood, t.frame))} />
+          {raster}
           <Box flexDirection="column" justifyContent="center" paddingLeft={1}>
             <Text bold>{art.caption}</Text>
             <Text dimColor>
@@ -160,6 +171,10 @@ export const register: Register = on => {
     }
 
     const { Box, Text } = $.ui.resolve(e)
+    const why =
+      e.surface === 'terminal'
+        ? `pixel art needs ${ROWS} rows x ${W} cols above the prompt, has ${maxRows} x ${bodyColumns}`
+        : undefined
 
     return (
       <Box flexDirection="row">
@@ -173,6 +188,7 @@ export const register: Register = on => {
           <Text dimColor>
             workload {meter} {t.load} tools/30s
           </Text>
+          {why && <Text dimColor>{why}</Text>}
         </Box>
       </Box>
     )
