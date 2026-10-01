@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { RenderPropsOf } from 'claude-code'
 
 import { BUSY_LOAD, FRANTIC_LOAD, SLEEPY_AFTER_MS, draw, moodFor, pickIdle } from '../hooks/pet'
-import { H, ROWS, W, paint, toCells } from '../hooks/pixels'
+import { H, ROWS, W, paint, quadrant, toCells } from '../hooks/pixels'
 
 const BAND = {
   plugin: 'code-pet',
@@ -108,5 +108,22 @@ describe('pixels', () => {
         }
       }
     }
+  })
+})
+
+describe('quadrants', () => {
+  const DEFAULT = 0x01000000
+
+  test('two colors keep their shape, transparency stays the background', () => {
+    expect(quadrant([0xff0000, null, null, 0xff0000])).toEqual([0x259a, 0xff0000, DEFAULT])
+    expect(quadrant([1, 1, 2, 2])).toEqual([0x2580, 1, 2])
+    expect(quadrant([null, null, null, null])).toEqual([0x20, DEFAULT, DEFAULT])
+    expect(quadrant([5, 5, 5, 5])).toEqual([0x2588, 5, DEFAULT])
+  })
+
+  test('a third color joins the nearer of the two kept', () => {
+    const [ch, fg, bg] = quadrant([0x000000, 0x000000, 0xffffff, 0xeeeeee])
+    // white and near-white tie; the darker one is kept, the other joins it
+    expect([ch, fg, bg]).toEqual([0x2580, 0x000000, 0xeeeeee])
   })
 })
