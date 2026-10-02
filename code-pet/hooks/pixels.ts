@@ -30,6 +30,19 @@ const PALETTE: Record<string, number> = {
   H: 0xff5c8a, // hearts
   S: 0xfff3a0, // sparkles
   g: 0xb5e04a, // tennis ball
+  M: 0xffb6d9, // mew
+  m: 0xd77fb0, // psychic glow
+  I: 0x3f8fe8, // mew's eyes
+  T: 0x2f6f7a, // snorlax
+  c: 0xf2e3c0, // snorlax belly
+  J: 0xffb0cc, // jigglypuff
+  A: 0x2aa198, // jigglypuff's eyes
+  y: 0xfff2b0, // togepi
+  U: 0x3a7bd5, // togepi's blue marks
+  F: 0xe08a3c, // shiba
+  Q: 0x9a9a9a, // raccoon
+  X: 0x454545, // raccoon mask
+  V: 0x334a7a, // pengu
 }
 
 type Sprite = readonly string[]
@@ -46,6 +59,11 @@ type Body = {
   tail: readonly Sprite[]
   tailAt: [number, number]
   ball: Sprite
+  /** What the dark of the open eyes is painted in; outline black when absent. */
+  eyeInk?: string
+  floats?: boolean
+  /** Eyes stay half shut unless something startles it. */
+  sleepy?: boolean
 }
 
 // Each body is 29 pixels wide (a mirrored half of 15) and 18 tall.
@@ -137,6 +155,229 @@ const BODIES: Record<Species, Body> = {
     tailAt: [27, 6],
     ball: widen(['.RR.', 'KKKK', 'WWWW', '.WW.']),
   },
+  mew: {
+    sprite: mirror([
+      '...............',
+      '...KK..........',
+      '...KMK.........',
+      '...KMMKKKKKKKKK',
+      '..KMMMMMMMMMMMM',
+      '.KMMMMMMMMMMMMM',
+      '.KMMMMMMMMMMMMM',
+      'KMMMMMMMMMMMMMM',
+      'KMMMMMMMMMMMMMM',
+      'KMMMMMMMMMMMKMM',
+      '.KMMMMMMMMMMMKK',
+      '..KKMMMMMMMMMMM',
+      '....KKKKKMMMMMM',
+      '........KMMMMMM',
+      '......KMKMMMMMM',
+      '........KMMMMMM',
+      '........KMMKMMM',
+      '........KKKKKKK',
+    ]),
+    eyes: [[4, 7], [21, 7]],
+    eyeInk: 'I',
+    floats: true,
+    tail: [
+      [
+        '.............MM.',
+        '............MMMM',
+        '............MMMM',
+        '.............MM.',
+        '.............M..',
+        '............M...',
+        '...........M....',
+        '..........M.....',
+        '.........M......',
+        '........M.......',
+        '......MM........',
+        '...MMM..........',
+        'MMM.............',
+      ],
+      [
+        '..............MM',
+        '.............MMM',
+        '.............MMM',
+        '..............MM',
+        '.............M..',
+        '............M...',
+        '...........M....',
+        '..........M.....',
+        '.........M......',
+        '........M.......',
+        '......MM........',
+        '...MMM..........',
+        'MMM.............',
+      ],
+    ],
+    tailAt: [19, 3],
+    ball: ['..CCCC..', '.C....C.', 'C......C', 'C......C', '.C....C.', '..CCCC..'],
+  },
+  snorlax: {
+    sprite: mirror([
+      '...KK..........',
+      '...KTK...KKKKKK',
+      '...KTTKKKTTTTTT',
+      '..KTTTTTTTTTTTT',
+      '..KTTTTcccccccc',
+      '.KTTTcccccccccc',
+      '.KTTccccccccccc',
+      '.KTTccccccccccc',
+      '.KTTccccccccKKK',
+      'KTTTTcccccccccc',
+      'KTTTTTTTTcccccc',
+      'KTTTTcccccccccc',
+      'KTTTccccccccccc',
+      'KTTTccccccccccc',
+      'KTTTccccccccccc',
+      '.KTTTcccccccccc',
+      '.KccKKTTTcccccc',
+      '.KKKK.KKKKKKKKK',
+    ]),
+    eyes: [[7, 6], [18, 6]],
+    sleepy: true,
+    tail: [],
+    tailAt: [0, 0],
+    ball: ['....g...', '..RRRR..', '.RRRRRR.', '.RRRRRR.', '..RRRR..'],
+  },
+  jigglypuff: {
+    sprite: mirror([
+      '...............',
+      '..KK.....KKKKKK',
+      '..KJK..KKJJJJJJ',
+      '..KJJKKJJJJJJKK',
+      '..KJJJJJJJJJKJJ',
+      '.KJJJJJJJJJJKKJ',
+      '.KJJJJJJJJJJJJJ',
+      'KJJJJJJJJJJJJJJ',
+      'KJJJJJJJJJJJJJJ',
+      'KJJJJJJJJJJJJJJ',
+      'KJJJJJJJJJJJJJK',
+      '.KJJJJJJJJJJJJJ',
+      '.KJJJJJJJJJJJJJ',
+      '..KJJJJJJJJJJJJ',
+      '...KJJJJJJJJJJJ',
+      '....KKJJJJJJJJJ',
+      '.....KJJKKKKKKK',
+      '.....KKK.......',
+    ]),
+    eyes: [[4, 7], [21, 7]],
+    eyeInk: 'A',
+    tail: [],
+    tailAt: [0, 0],
+    ball: ['.GGG.', 'GGGGG', '.GGG.', '..K..', '..K..', '..K..'],
+  },
+  togepi: {
+    sprite: mirror([
+      '.....K...K....K',
+      '....KyK.KyK..Ky',
+      '...KyyyKyyyKKyy',
+      '..Kyyyyyyyyyyyy',
+      '.Kyyyyyyyyyyyyy',
+      '.Kyyyyyyyyyyyyy',
+      'Kyyyyyyyyyyyyyy',
+      'Kyyyyyyyyyyyyyy',
+      'KyyyyyyyyyyyKyy',
+      'KyyyyyyyyyyyyKK',
+      '.KyyKyyKyyKyyKy',
+      'KWWWWWWWWWWWWWW',
+      'KWWRRWWWWWUUWWW',
+      'KWRRRRWWWUUUUWW',
+      'KWWWWWWWWWWWWWW',
+      '.KWWWWWWWWWWWWW',
+      '..KWWWWWWWWWWWW',
+      '...KyyK.KKKKKKK',
+    ]),
+    eyes: [[6, 6], [19, 6]],
+    tail: [],
+    tailAt: [0, 0],
+    ball: widen(['.S.', 'SSS', '.S.']),
+  },
+  shiba: {
+    sprite: mirror([
+      '..KK...........',
+      '..KFK..........',
+      '..KcFK.........',
+      '..KccFKKKKKKKKK',
+      '.KFFFFFFFFFFFFF',
+      '.KFFFFFFFFFFFFF',
+      'KFFFFFFFFFFFFFF',
+      'KFFFFFFFFFFFFFF',
+      'KFFFFFFFFFFFFFF',
+      'KccFFFFFFcccccc',
+      '.KcccccccccccKK',
+      '..KKccccccccccK',
+      '....KKFFFFccccc',
+      '...KFFFFFcccccc',
+      '...KFFFFFcccccc',
+      '...KFFFFFcccccc',
+      '...KccKKKcccccc',
+      '...KKKKKKKKKKKK',
+    ]),
+    eyes: [[6, 7], [19, 7]],
+    tail: [
+      ['.KKK.', 'KFcFK', 'KcKFK', 'KFFK.', '.KK..'],
+      ['..KKK', '.KFcF', '.KcKF', '.KFFK', '..KK.'],
+    ],
+    tailAt: [26, 9],
+    ball: widen(['.R.', 'RRR', '.R.']),
+  },
+  raccoon: {
+    sprite: mirror([
+      '..KK...........',
+      '..KQK..........',
+      '..KWQK.........',
+      '..KQQQKKKKKKKKK',
+      '.KQQQQQQQQQQQQQ',
+      '.KQQQQQQQQQQQQW',
+      'KQWWWWWWWWWQQQW',
+      'KXXXXXXXXXXXQQW',
+      'KXXXXXXXXXXXQQW',
+      'KQWWWWWWWWWQQQW',
+      '.KWWWWWWWWWWWKK',
+      '..KKWWWWWWWWWWK',
+      '....KKQQQQQQQQQ',
+      '...KQQQQQQWWWWW',
+      '...KQQQQQWWWWWW',
+      '...KQQQQQWWWWWW',
+      '...KQQKKQWWWWWW',
+      '...KKKKKKKKKKKK',
+    ]),
+    eyes: [[6, 7], [19, 7]],
+    tail: [
+      ['...KKK', '..KXXK', '.KQQK.', '.KXXK.', 'KQQK..', 'KXXK..', 'KQK...'],
+      ['..KKK.', '.KXXK.', '.KQQK.', '.KXXK.', 'KQQK..', 'KXXK..', 'KQK...'],
+    ],
+    tailAt: [26, 9],
+    ball: widen(['.Y.', 'YYY', '.Y.']),
+  },
+  pengu: {
+    sprite: mirror([
+      '...............',
+      '.......KKKKKKKK',
+      '.....KKVVVVVVVV',
+      '....KVVVVVVVVVV',
+      '...KVVVVVVVVVVV',
+      '..KVVVWWWWVVVVV',
+      '..KVVWWWWWWWVVW',
+      '.KVVWWWWWWWWWWW',
+      '.KVVWWWWWWWWWWW',
+      '.KVVWPPWWWWWOOO',
+      'KVVVWWWWWWWWWOO',
+      'KVVVWWWWWWWWWWW',
+      'KVVWWWWWWWWWWWW',
+      'KVVWWWWWWWWWWWW',
+      'KVVVWWWWWWWWWWW',
+      '.KVVWWWWWWWWWWW',
+      '..KKVOOWWWWWWWW',
+      '...KOOOOKKKKKKK',
+    ]),
+    eyes: [[6, 7], [19, 7]],
+    tail: [],
+    tailAt: [0, 0],
+    ball: ['.CCC.C', 'CCCCCC', '.CCC.C'],
+  },
 }
 
 // 4 x 2 eye expressions; '.' keeps the fur.
@@ -159,6 +400,8 @@ const STAMPS = {
   sweat: widen(['.C', 'CC', 'CC']),
   bone: widen(['W....W', 'WWWWWW', 'W....W']),
   sparks: ['S.S', '.S.', 'S.S'],
+  psy: widen(['m.m', '.m.', 'm.m']),
+  note: ['..HH', '..H.', '..H.', 'HHH.', 'HH..'],
 } as const satisfies Record<string, Sprite>
 
 type Canvas = (number | null)[][]
@@ -216,36 +459,53 @@ export function paint(species: Species, mood: Mood, frame: number): Canvas {
   else if (mood === 'sleep') bob = Math.floor(frame / 4) % 2
   else if (mood === 'startled' || mood === 'happy') bob = frame % 2 ? 0 : -1
   else if (mood === 'play') bob = ballAt(frame)[0] < 50 ? -1 : 0
+  // Mew hovers: a slow drift up and down whenever it is awake.
+  if (body.floats && mood !== 'sleep' && bob === 0) bob = [0, -1, -1, 0][Math.floor(frame / 2) % 4]!
 
   const px = 8
   const py = 1 + bob
   const wags = mood !== 'sleep' && mood !== 'sit'
-  const tail = body.tail[wags ? frame % body.tail.length : 0]!
-  stamp(canvas, tail, px + body.tailAt[0], py + body.tailAt[1])
+  const tail = body.tail[wags ? frame % body.tail.length : 0]
+  if (tail) stamp(canvas, tail, px + body.tailAt[0], py + body.tailAt[1])
   stamp(canvas, body.sprite, px, py)
-  const eyes = eyeStyle(mood, frame)
+  const looked = eyeStyle(mood, frame)
+  const style = body.sleepy && looked !== EYES.wide && looked !== EYES.happy ? EYES.closed : looked
+  const ink = body.eyeInk
+  const eyes = ink && style !== EYES.closed && style !== EYES.happy ? style.map(row => row.replaceAll('K', ink)) : style
   for (const [ex, ey] of body.eyes) stamp(canvas, eyes, px + ex, py + ey)
 
   const rise = (offset: number) => 10 - ((frame + offset) % 10)
+  const power = species === 'pikachu' ? STAMPS.bolt : species === 'mew' ? STAMPS.psy : undefined
   switch (mood) {
     case 'sleep':
       stamp(canvas, STAMPS.z, 46, rise(0))
       stamp(canvas, STAMPS.bigZ, 56, rise(5) - 2)
       break
-    case 'purr':
-      stamp(canvas, STAMPS.heart, 46, rise(0))
-      stamp(canvas, STAMPS.heart, 60, rise(5))
+    case 'purr': {
+      const love = species === 'jigglypuff' ? STAMPS.note : STAMPS.heart
+      stamp(canvas, love, 46, rise(0))
+      stamp(canvas, love, 60, rise(5))
       break
+    }
     case 'groom':
       if (species === 'dog') stamp(canvas, STAMPS.bone, 44, 14)
       else if (species === 'pikachu') {
         stamp(canvas, STAMPS.sparks, px - 3 + (frame % 2), py + 9)
         stamp(canvas, STAMPS.sparks, px + 29 - (frame % 2), py + 9)
-      } else stamp(canvas, STAMPS.heart, 46, rise(0))
+      } else if (species === 'mew') {
+        stamp(canvas, STAMPS.psy, 44 + (frame % 3) * 4, rise(0))
+        stamp(canvas, STAMPS.psy, 58 - (frame % 3) * 4, rise(5))
+      } else if (species === 'jigglypuff') stamp(canvas, STAMPS.note, 46, rise(0))
+      else if (species === 'togepi') stamp(canvas, STAMPS.sparkle, frame % 2 ? 44 : 48, rise(0))
+      else if (species === 'raccoon') {
+        stamp(canvas, STAMPS.sweat, 40, 12 + (frame % 3))
+        stamp(canvas, STAMPS.sweat, 46, 14 - (frame % 3))
+      }
+      else stamp(canvas, STAMPS.heart, 46, rise(0))
       break
     case 'play': {
       const [bx, by] = ballAt(frame)
-      stamp(canvas, body.ball, bx, by)
+      stamp(canvas, body.ball, bx, by - Math.max(0, body.ball.length - 4))
       break
     }
     case 'busy':
@@ -253,15 +513,15 @@ export function paint(species: Species, mood: Mood, frame: number): Canvas {
       for (const y of [5, 10, 15]) stamp(canvas, [frame % 2 ? 'GGGGG' : '.GGGG'], 0, y + (frame % 2))
       if (mood === 'frantic') {
         stamp(canvas, STAMPS.sweat, 40, py + 1)
-        stamp(canvas, species === 'pikachu' ? STAMPS.bolt : STAMPS.bang, 48, 2 + (frame % 2))
-        if (species === 'pikachu') stamp(canvas, STAMPS.bolt, 60, 6 - (frame % 2))
-      } else if (species === 'pikachu' && frame % 4 === 0) {
-        stamp(canvas, STAMPS.bolt, 46, 4)
+        stamp(canvas, power ?? STAMPS.bang, 48, 2 + (frame % 2))
+        if (power) stamp(canvas, power, 60, 6 - (frame % 2))
+      } else if (power && frame % 4 === 0) {
+        stamp(canvas, power, 46, 4)
       }
       break
     case 'startled':
-      stamp(canvas, species === 'pikachu' ? STAMPS.bolt : STAMPS.bang, 46, 2)
-      if (species === 'pikachu') stamp(canvas, STAMPS.bolt, 58, 5)
+      stamp(canvas, power ?? STAMPS.bang, 46, 2)
+      if (power) stamp(canvas, power, 58, 5)
       break
     case 'happy':
       stamp(canvas, STAMPS.sparkle, frame % 2 ? 44 : 48, 2)
@@ -356,3 +616,4 @@ export function toCells(canvas: Canvas): string {
   }
   return base64(new Uint8Array(view.buffer))
 }
+

@@ -1,8 +1,9 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { RenderPropsOf } from 'claude-code'
 
-import { BUSY_LOAD, FRANTIC_LOAD, SLEEPY_AFTER_MS, draw, moodFor, pickIdle } from '../hooks/pet'
+import { BUSY_LOAD, FRANTIC_LOAD, SLEEPY_AFTER_MS, SPECIES_WORDS, draw, moodFor, pickIdle } from '../hooks/pet'
 import { H, ROWS, W, paint, quadrant, toCells } from '../hooks/pixels'
+import { vectorSvg } from '../hooks/vector'
 
 const BAND = {
   plugin: 'code-pet',
@@ -59,6 +60,7 @@ describe('band', () => {
       const ui = await $.ui.mount({ ...BAND, surface })
       expect(await ui.find({ type: 'Text', text: /Rex/ })).toBeDefined()
       expect(await ui.find({ type: 'Raster' })).toEqual(surface === 'terminal' ? expect.anything() : undefined)
+      expect(await ui.find({ type: 'Svg' })).toEqual(surface === 'desktop' ? expect.anything() : undefined)
       await ui.unmount()
     }
 
@@ -88,6 +90,13 @@ describe('band', () => {
     expect((await run('dog')).text).toContain('dog')
     expect((await run('name Biscuit')).text).toContain('Biscuit')
     expect((await run('pickahu')).text).toContain('pikachu')
+    expect((await run('mew')).text).toContain('mew')
+    expect((await run('relaxo')).text).toContain('snorlax')
+    expect((await run('Pummeluff')).text).toContain('jigglypuff')
+    expect((await run('togepi')).text).toContain('togepi')
+    expect((await run('shiba')).text).toContain('shiba')
+    expect((await run('waschbär')).text).toContain('raccoon')
+    expect((await run('pinguin')).text).toContain('pengu')
 
     await run('hide')
     const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
@@ -99,11 +108,12 @@ describe('band', () => {
 describe('pixels', () => {
   test('every species and mood packs into a full raster', () => {
     const moods = ['sit', 'sleep', 'purr', 'groom', 'play', 'watch', 'busy', 'frantic', 'startled', 'happy', 'perk'] as const
-    for (const species of ['cat', 'dog', 'pikachu'] as const) {
+    for (const species of new Set(Object.values(SPECIES_WORDS))) {
       for (const mood of moods) {
         for (const frame of [0, 1, 7, 13]) {
           const canvas = paint(species, mood, frame)
           expect(canvas).toHaveLength(H)
+          expect(draw(species, mood, frame, 'X').lines).toHaveLength(4)
           expect(toCells(canvas)).toHaveLength((W * ROWS * 12 * 4) / 3)
         }
       }
@@ -125,5 +135,35 @@ describe('quadrants', () => {
     const [ch, fg, bg] = quadrant([0x000000, 0x000000, 0xffffff, 0xeeeeee])
     // white and near-white tie; the darker one is kept, the other joins it
     expect([ch, fg, bg]).toEqual([0x2580, 0x000000, 0xeeeeee])
+  })
+})
+
+describe('mew', () => {
+  test('hovers while awake and rests while asleep', () => {
+    const top = (species: 'mew', mood: 'sit' | 'sleep', frame: number) =>
+      paint(species, mood, frame).findIndex(row => row.some(p => p !== null))
+    const awake = new Set([0, 1, 2, 3, 4, 5, 6, 7].map(f => top('mew', 'sit', f)))
+    expect(awake.size).toBeGreaterThan(1)
+    expect(draw('mew', 'play', 0, 'Mew').caption).toContain('bubble')
+  })
+})
+
+describe('svg', () => {
+  test('every species and mood draws as a vector within the size limit', () => {
+    const moods = ['sit', 'sleep', 'purr', 'groom', 'play', 'watch', 'busy', 'frantic', 'startled', 'happy', 'perk'] as const
+    for (const species of [...new Set(Object.values(SPECIES_WORDS))]) {
+      for (const mood of moods) {
+        const svg = vectorSvg(species, mood, 3)
+        expect(svg.startsWith('<svg')).toBe(true)
+        expect(svg).toContain(`id="fur-${species}"`)
+        expect(svg).not.toContain('NaN')
+        expect(svg).not.toContain('undefined')
+        expect(svg.length).toBeLessThan(131072)
+      }
+    }
+  })
+
+  test('the toy moves while playing', () => {
+    expect(vectorSvg('dog', 'play', 0)).not.toBe(vectorSvg('dog', 'play', 5))
   })
 })

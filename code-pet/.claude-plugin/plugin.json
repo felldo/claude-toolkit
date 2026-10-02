@@ -1,7 +1,7 @@
 {
   "name": "code-pet",
   "version": "0.1.0",
-  "description": "A cat, dog or Pikachu above the prompt that reacts to Claude's workload and plays when idle",
+  "description": "A pet above the prompt (cat, dog, Shiba Inu, raccoon, Pikachu, Mew, Snorlax, Jigglypuff, Togepi or Pengu) that reacts to Claude's workload and plays when idle",
   "author": { "name": "Dominic Fellbaum" },
   "types": "./types/index.d.ts"
 }

@@ -2,8 +2,9 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { PetConfig, PetEvent, PetIdle, PetTick, Species } from '../types'
-import { LOAD_WINDOW_MS, MOOD_COLOR, draw, idleDurationMs, moodFor, pickIdle } from './pet'
+import { BUSY_LOAD, FRANTIC_LOAD, LOAD_WINDOW_MS, MOOD_COLOR, SPECIES_WORDS, draw, idleDurationMs, moodFor, pickIdle } from './pet'
 import { ROWS, W, paint, toCells } from './pixels'
+import { vectorSvg } from './vector'
 
 const FRAME_MS = 500
 const STORE_KEY = 'config'
@@ -14,14 +15,36 @@ const event = atom({ plugin: 'code-pet', key: 'event' } as const, null as PetEve
 const idle = atom({ plugin: 'code-pet', key: 'idle' } as const, { activity: 'sit', until: 0 } as PetIdle)
 const config = atom({ plugin: 'code-pet', key: 'config' } as const, DEFAULT_CONFIG)
 
-const SPECIES_ALIASES: Record<string, string> = { pika: 'pikachu', pickachu: 'pikachu', pickahu: 'pikachu', pikachu: 'pikachu' }
+const SPECIES_COLOR: Record<Species, string | undefined> = {
+  cat: undefined,
+  dog: undefined,
+  pikachu: 'yellow',
+  mew: 'magenta',
+  snorlax: 'cyan',
+  jigglypuff: 'magenta',
+  togepi: undefined,
+  shiba: 'yellow',
+  raccoon: undefined,
+  pengu: 'blue',
+}
+
+const SPECIES_LIST = [...new Set(Object.values(SPECIES_WORDS))].join(', ')
 
 const HELP = [
   '/pet                      show what your pet is up to',
-  '/pet cat | dog | pikachu  switch species',
+  '/pet <species>            switch species: ' + SPECIES_LIST,
   '/pet name <name>          rename your pet',
   '/pet hide | show          hide or show the pet',
 ].join('\n')
+
+/** The workload meter as SVG: the desktop's fonts lack the terminal's ▮▯. */
+function meterSvg(load: number): string {
+  const bars = Array.from({ length: 12 }, (_, i) => {
+    const fill = i < load ? (load >= FRANTIC_LOAD ? '#e05050' : load >= BUSY_LOAD ? '#e0b040' : '#9a9a9a') : '#3a3a3a'
+    return `<rect x="${i * 8}" y="0" width="6" height="10" rx="1" fill="${fill}"/>`
+  })
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 10">${bars.join('')}</svg>`
+}
 
 async function react($: EngineInterface, kind: PetEvent['kind']) {
   const now = await $.clock.now()
@@ -48,7 +71,7 @@ export const register: Register = on => {
 
     await $.command.register({
       name: 'pet',
-      description: 'Your pet: /pet [cat|dog|pikachu|name <name>|hide|show]',
+      description: 'Your pet: /pet [<species>|name <name>|hide|show|help]',
     })
 
     $.clock.every(FRAME_MS, async () => {
@@ -95,10 +118,11 @@ export const register: Register = on => {
 
   on('command.run', { command: 'pet' }, async ($, e) => {
     const [verb = '', ...rest] = e.args.trim().split(/\s+/)
-    const word = SPECIES_ALIASES[verb.toLowerCase()] ?? verb.toLowerCase()
+    const word = verb.toLowerCase()
+    const species: Species | undefined = SPECIES_WORDS[word]
 
-    if (word === 'cat' || word === 'dog' || word === 'pikachu') {
-      const cfg = await saveConfig($, c => ({ ...c, species: word as Species, isHidden: false }))
+    if (species) {
+      const cfg = await saveConfig($, c => ({ ...c, species, isHidden: false }))
       return { text: `${cfg.name} is now a ${cfg.species}.` }
     }
     if (word === 'name') {
@@ -145,7 +169,7 @@ export const register: Register = on => {
       now: t.now,
     })
     const art = draw(cfg.species, mood, t.frame, cfg.name)
-    const color = MOOD_COLOR[mood] ?? (cfg.species === 'pikachu' ? 'yellow' : undefined)
+    const color = MOOD_COLOR[mood] ?? SPECIES_COLOR[cfg.species]
     const meter = '▮'.repeat(Math.min(t.load, 12)) + '▯'.repeat(Math.max(0, 12 - t.load))
     // Pixel art where the terminal has room for it; text art everywhere else.
     const { maxRows, bodyColumns } = e.props
@@ -170,11 +194,26 @@ export const register: Register = on => {
       )
     }
 
+    // Remote surfaces (desktop, editor, mobile) draw the pet as a vector drawing.
+    if (e.surface !== 'terminal') {
+      const { Box, Text, Svg } = $.ui.resolve(e)
+      return (
+        <Box flexDirection="row">
+          <Svg key="pet" source={vectorSvg(cfg.species, mood, t.frame)} alt={art.caption} width={300} height={150} />
+          <Box flexDirection="column" justifyContent="center" paddingLeft={1}>
+            <Text bold>{art.caption}</Text>
+            <Box flexDirection="row">
+              <Text dimColor>workload </Text>
+              <Svg key="meter" source={meterSvg(t.load)} alt={`${t.load} tools in the last 30s`} width={96} height={10} />
+              <Text dimColor> {t.load} tools/30s</Text>
+            </Box>
+          </Box>
+        </Box>
+      )
+    }
+
     const { Box, Text } = $.ui.resolve(e)
-    const why =
-      e.surface === 'terminal'
-        ? `pixel art needs ${ROWS} rows x ${W} cols above the prompt, has ${maxRows} x ${bodyColumns}`
-        : undefined
+    const why = `pixel art needs ${ROWS} rows x ${W} cols above the prompt, has ${maxRows} x ${bodyColumns}`
 
     return (
       <Box flexDirection="row">
@@ -188,7 +227,7 @@ export const register: Register = on => {
           <Text dimColor>
             workload {meter} {t.load} tools/30s
           </Text>
-          {why && <Text dimColor>{why}</Text>}
+          <Text dimColor>{why}</Text>
         </Box>
       </Box>
     )

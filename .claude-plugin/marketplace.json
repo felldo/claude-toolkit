@@ -6,7 +6,13 @@
     {
       "name": "code-pet",
       "source": "./code-pet",
-      "description": "A cat, dog or Pikachu above the prompt that reacts to Claude's workload and plays when idle",
+      "description": "A pet above the prompt (cat, dog, Shiba Inu, raccoon, Pikachu, Mew, Snorlax, Jigglypuff, Togepi or Pengu) that reacts to Claude's workload and plays when idle",
+      "version": "0.1.0"
+    },
+    {
+      "name": "git-status",
+      "source": "./git-status",
+      "description": "Git status above the prompt: branch, open issues and pull requests, and the CI checks, test counts and deployments of your PR",
       "version": "0.1.0"
     }
   ]

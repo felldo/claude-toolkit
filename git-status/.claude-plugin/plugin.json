@@ -1,0 +1,23 @@
+{
+  "name": "git-status",
+  "version": "0.1.0",
+  "description": "Git status above the prompt: branch, open issues and pull requests, and the CI checks, test counts and deployments of your PR (needs the GitHub CLI, gh)",
+  "author": {
+    "name": "Dominic Fellbaum"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "repo": {
+      "type": "string",
+      "title": "Repository",
+      "description": "owner/name to show, when it is not the GitHub remote of the working directory",
+      "default": ""
+    },
+    "refreshSeconds": {
+      "type": "number",
+      "title": "Default auto refresh (seconds)",
+      "description": "Auto refresh interval until the Auto button picks another",
+      "default": 60
+    }
+  }
+}

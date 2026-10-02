@@ -1,4 +1,4 @@
-export type Species = 'cat' | 'dog' | 'pikachu'
+export type Species = 'cat' | 'dog' | 'pikachu' | 'mew' | 'snorlax' | 'jigglypuff' | 'togepi' | 'shiba' | 'raccoon' | 'pengu'
 
 export type IdleActivity = 'play' | 'purr' | 'groom' | 'sleep' | 'sit'
 
