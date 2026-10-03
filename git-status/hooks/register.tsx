@@ -3,7 +3,7 @@ import type { EngineInterface, Register, RenderInput } from 'claude-code'
 
 type RenderEvent = RenderInput<'Pane' | 'AbovePrompt'>
 
-import type { Check, Deployment, Item, LocalStatus, PullRequest, Remote, Snapshot } from '../types'
+import type { Check, Deployment, Item, LocalStatus, PullDetails, PullRequest, Release, Remote, Snapshot } from '../types'
 import {
   aggregate,
   checkFromRun,
@@ -12,7 +12,14 @@ import {
   deploymentOf,
   latestPerEnvironment,
   parsePorcelain,
+  checkTime,
+  ciChange,
+  formatDuration,
+  mergeSummary,
   parseGhResponse,
+  pullDetailsOf,
+  reviewSummary,
+  safeUrl,
   parseRemote,
   intervalLabel,
   nextInterval,
@@ -162,7 +169,14 @@ async function ghGet<T>($: EngineInterface, path: string): Promise<{ body: T; li
   return { body: JSON.parse(response.body) as T, link: response.headers.link }
 }
 
-type RawIssue = { number: number; title: string; user: { login: string } | null; pull_request?: unknown; draft?: boolean }
+type RawIssue = {
+  number: number
+  title: string
+  user: { login: string } | null
+  pull_request?: unknown
+  draft?: boolean
+  html_url?: string
+}
 type RawPull = RawIssue & { html_url: string; head: { sha: string; ref: string }; base: { ref: string } }
 
 const itemOf = (raw: RawIssue): Item => ({
@@ -170,7 +184,94 @@ const itemOf = (raw: RawIssue): Item => ({
   title: raw.title,
   author: raw.user?.login ?? '?',
   isDraft: raw.draft || undefined,
+  isPull: raw.pull_request ? true : undefined,
+  url: safeUrl(raw.html_url) ?? undefined,
 })
+
+const PULL_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewDecision mergeable mergeStateStatus additions deletions changedFiles
+      reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } ... on Team { name } ... on Bot { login } } } }
+      latestReviews(first: 20) { nodes { author { login } state } }
+      reviewThreads(first: 100) { nodes { isResolved } }
+    }
+  }
+}`
+
+/** One GraphQL query through gh. */
+async function ghGraphql<T>($: EngineInterface, query: string, variables: Record<string, string | number>): Promise<T> {
+  const fields = Object.entries(variables).flatMap(([name, value]) => ['-F', `${name}=${value}`])
+  const { stdout, stderr } = await $.process.run([runtime.gh ?? 'gh', 'api', 'graphql', '-f', `query=${query}`, ...fields], {
+    timeoutMs: 20_000,
+  })
+  let answer: { data?: T; errors?: { message: string }[] }
+  try {
+    answer = JSON.parse(stdout) as typeof answer
+  } catch {
+    throw new GitHubError(stderr.trim() || 'gh api graphql gave no answer')
+  }
+  if (!answer.data) throw new GitHubError(answer.errors?.[0]?.message ?? 'GraphQL gave no data')
+
+  return answer.data
+}
+
+async function readPullDetails($: EngineInterface, repo: string, number: number): Promise<PullDetails | null> {
+  const [owner, name] = repo.split('/')
+  try {
+    const data = await ghGraphql<{ repository: { pullRequest: Parameters<typeof pullDetailsOf>[0] | null } }>($, PULL_QUERY, {
+      owner: owner ?? '',
+      name: name ?? '',
+      number,
+    })
+
+    return data.repository.pullRequest ? pullDetailsOf(data.repository.pullRequest) : null
+  } catch {
+    return null
+  }
+}
+
+/** Open issues and PRs of the repository a search finds for the person gh is logged in as. */
+async function searchMine($: EngineInterface, repo: string, terms: string): Promise<Item[]> {
+  const q = encodeURIComponent(`repo:${repo} is:open ${terms}`)
+  try {
+    const { body } = await ghGet<{ items: RawIssue[] }>($, `/search/issues?q=${q}&per_page=${LISTED}&sort=updated`)
+
+    return body.items.map(itemOf)
+  } catch {
+    return []
+  }
+}
+
+/** The newest release, else the newest tag, and how many commits `sha` is past it. */
+async function readRelease($: EngineInterface, repo: string, sha: string | null): Promise<Release | null> {
+  let release: Release | null = null
+  try {
+    const { body } = await ghGet<{ tag_name: string; published_at: string | null; html_url: string }>($, `/repos/${repo}/releases/latest`)
+    if (!body.tag_name) throw new GitHubError('no release')
+    release = { tag: body.tag_name, isRelease: true, publishedAt: body.published_at, url: body.html_url, commitsSince: null }
+  } catch {
+    try {
+      const { body } = await ghGet<{ name: string }[]>($, `/repos/${repo}/tags?per_page=1`)
+      const tag = body[0]
+      if (tag) {
+        release = { tag: tag.name, isRelease: false, publishedAt: null, url: `https://github.com/${repo}/tree/${encodeURIComponent(tag.name)}`, commitsSince: null }
+      }
+    } catch {
+      // no tags either
+    }
+  }
+  if (release && sha) {
+    try {
+      const { body } = await ghGet<{ ahead_by: number }>($, `/repos/${repo}/compare/${encodeURIComponent(release.tag)}...${sha}`)
+      release.commitsSince = body.ahead_by
+    } catch {
+      // a commit GitHub has not seen yet
+    }
+  }
+
+  return release
+}
 
 /** Everything GitHub knows about the repository and the branch. */
 async function readRemote(
@@ -194,15 +295,20 @@ async function readRemote(
     const own = await ghGet<RawPull[]>($, `/repos/${repo}/pulls?state=open&head=${owner}:${encodeURIComponent(local.branch)}`)
     const raw = own.body[0]
     if (raw) {
-      pr = { ...itemOf(raw), url: raw.html_url, headSha: raw.head.sha, base: raw.base.ref }
+      pr = { ...itemOf(raw), url: raw.html_url, headSha: raw.head.sha, base: raw.base.ref, details: null }
     }
   }
 
   const sha = pr?.headSha ?? local?.pushedSha ?? null
-  const [pipeline, deployments] = await Promise.all([
+  const [pipeline, deployments, details, assigned, reviewRequests, release] = await Promise.all([
     sha ? readPipeline($, repo, sha) : Promise.resolve(null),
     readDeployments($, repo, sha),
+    pr ? readPullDetails($, repo, pr.number) : Promise.resolve(null),
+    searchMine($, repo, 'assignee:@me'),
+    searchMine($, repo, 'is:pr review-requested:@me'),
+    readRelease($, repo, sha ?? local?.sha ?? null),
   ])
+  if (pr) pr.details = details
 
   return {
     repo,
@@ -211,6 +317,9 @@ async function readRemote(
     issues: issues.slice(0, LISTED).map(itemOf),
     pulls: pulls.slice(0, LISTED).map(itemOf),
     pr,
+    assigned,
+    reviewRequests,
+    release,
     pipeline,
     deployments,
   }
@@ -280,6 +389,10 @@ async function refreshRemote($: EngineInterface) {
       if (runtime.rateRemaining === 0) runtime.pausedUntil = runtime.rateReset
     }
 
+    const before = (await read($, snapshot)).remote
+    const toast = ciChange(before?.pipeline ?? null, remote.pipeline, remote.pr ? `PR #${remote.pr.number}` : (local?.branch ?? ''))
+    if (toast) $.ui.toast(toast, { timeoutMs: 8000 })
+
     const now = await $.clock.now()
     await update($, snapshot, () => ({ local, remote, updatedAt: now, isRefreshing: false }))
   } finally {
@@ -313,49 +426,205 @@ async function cycleInterval($: EngineInterface) {
 }
 
 
-/** One line: branch, changes, PR, CI, tests, deployments, open issues and PRs. */
-function summary(local: LocalStatus, remote: Remote | null): string {
-  const changes = local.staged + local.modified + local.untracked
-  const parts = [
-    `⎇ ${local.branch ?? 'detached'}${local.ahead ? ` ↑${local.ahead}` : ''}${local.behind ? ` ↓${local.behind}` : ''}${changes ? ` ✚${changes}` : ''}`,
-  ]
-  if (remote?.pr) parts.push(`PR #${remote.pr.number}`)
-  const p = remote?.pipeline
-  if (p && p.total > 0) {
-    const word = verdict(p)
-    const mark = word === 'failed' ? '✗' : word === 'running' ? '●' : '✓'
-    parts.push(`CI ${mark} ${p.passed}/${p.total}${p.running ? ` (${p.running} running)` : ''}`)
-    if (p.tests) parts.push(`Tests ${p.tests.passed}✓ ${p.tests.failed}✗`)
-  }
-  const deployment = remote?.deployments[0]
-  if (deployment) parts.push(`${deployment.environment}: ${deployment.state}`)
-  if (remote?.openIssues != null) parts.push(`${remote.openIssues} issues`)
-  if (remote?.openPulls != null) parts.push(`${remote.openPulls} PRs`)
-  if (remote?.error) parts.push(remote.error)
-  else if (remote && !remote.repo) parts.push('no GitHub remote')
+/** The whole picture: branch, PR, pipeline, deployments, open PRs and issues. */
+/** The band above the prompt: a few colored lines on branch, PR, pipeline and repository, with the toggle for the details. */
+async function drawOverview($: EngineInterface, e: RenderInput<'AbovePrompt'>, local: LocalStatus, remote: Remote | null, isExpanded: boolean) {
+  const { Box, Text, Button } = $.ui.resolve(e)
+  const pr = remote?.pr ?? null
+  const details = pr?.details ?? null
+  const pipeline = remote?.pipeline ?? null
+  const dot = <Text dimColor> · </Text>
+  const toggle = <Button key="git-details" label={isExpanded ? 'Less' : 'Git'} onPress={() => update($, expanded, is => !is)} />
 
-  return parts.join(' · ')
+  const branchLine = (
+    <Box>
+      <Text wrap="truncate-end">
+        ⎇ <Text bold>{local.branch ?? `detached ${local.sha?.slice(0, 7) ?? ''}`}</Text>
+        {local.upstream ? <Text dimColor> → {local.upstream}</Text> : <Text dimColor> (not pushed)</Text>}
+        {local.ahead ? <Text color="yellow"> ↑{local.ahead}</Text> : null}
+        {local.behind ? <Text color="yellow"> ↓{local.behind}</Text> : null}
+        {dot}
+        <Text color={local.staged ? 'green' : undefined} dimColor={!local.staged}>
+          ●{local.staged}
+        </Text>{' '}
+        <Text color={local.modified ? 'yellow' : undefined} dimColor={!local.modified}>
+          ✚{local.modified}
+        </Text>{' '}
+        <Text dimColor>?{local.untracked}</Text>
+        {local.conflicted ? <Text color="red"> ✗{local.conflicted} conflicts</Text> : null}
+        {local.lastCommit ? (
+          <Text dimColor>
+            {' · '}
+            {local.sha?.slice(0, 7)} {local.lastCommit}
+          </Text>
+        ) : null}{' '}
+      </Text>
+      {toggle}
+    </Box>
+  )
+  if (isExpanded || !remote) return branchLine
+
+  if (remote.error || !remote.repo) {
+    return (
+      <Box flexDirection="column">
+        {branchLine}
+        <Text color={remote.error ? 'red' : undefined} dimColor={!remote.error} wrap="truncate-end">
+          {remote.error ?? 'No GitHub remote (set the repo option to choose one).'}
+        </Text>
+      </Box>
+    )
+  }
+
+  const review = details ? reviewSummary(details) : null
+  const merge = details && pr ? mergeSummary(details, pr.base) : null
+  const failed = pipeline?.checks.filter(check => check.state === 'failed').map(check => check.name) ?? []
+  const word = pipeline ? verdict(pipeline) : 'none'
+  const deployment = remote.deployments[0]
+
+  return (
+    <Box flexDirection="column">
+      {branchLine}
+      <Text wrap="truncate-end">
+        {pr ? (
+          <Text>
+            <Text bold>PR #{pr.number}</Text> {pr.title}
+            {pr.isDraft ? <Text dimColor> (draft)</Text> : null}
+            <Text dimColor> → {pr.base}</Text>
+            {review ? (
+              <Text>
+                {dot}
+                <Text color={review.color}>{review.text}</Text>
+              </Text>
+            ) : null}
+            {merge ? (
+              <Text>
+                {dot}
+                <Text color={merge.color}>{merge.text}</Text>
+              </Text>
+            ) : null}
+            {details ? (
+              <Text>
+                {dot}
+                <Text color="green">+{details.additions}</Text> <Text color="red">−{details.deletions}</Text>
+                {details.unresolvedThreads ? <Text color="yellow"> · {details.unresolvedThreads} open threads</Text> : null}
+              </Text>
+            ) : null}
+          </Text>
+        ) : (
+          <Text dimColor>No open PR for this branch</Text>
+        )}
+      </Text>
+      <Text wrap="truncate-end">
+        {!pipeline || word === 'none' ? (
+          <Text dimColor>CI: no checks</Text>
+        ) : (
+          <Text>
+            <Text color={word === 'failed' ? 'red' : word === 'running' ? 'yellow' : 'green'}>
+              CI {word === 'failed' ? '✗ failed' : word === 'running' ? '● running' : '✓ passed'} {pipeline.passed}/{pipeline.total}
+            </Text>
+            {pipeline.running + pipeline.queued ? <Text color="yellow"> ({pipeline.running + pipeline.queued} running)</Text> : null}
+            {failed.length ? <Text color="red"> · ✗ {failed.slice(0, 3).join(', ')}{failed.length > 3 ? ` +${failed.length - 3}` : ''}</Text> : null}
+            {pipeline.tests ? (
+              <Text>
+                {dot}Tests <Text color="green">{pipeline.tests.passed}✓</Text>{' '}
+                <Text color={pipeline.tests.failed ? 'red' : undefined} dimColor={!pipeline.tests.failed}>
+                  {pipeline.tests.failed}✗
+                </Text>
+                {pipeline.tests.skipped ? <Text dimColor> {pipeline.tests.skipped} skipped</Text> : null}
+              </Text>
+            ) : null}
+          </Text>
+        )}
+        {deployment ? (
+          <Text>
+            {dot}
+            {deployment.environment}: <Text color={DEPLOY_COLOR[deployment.state]}>{deployment.state}</Text>
+          </Text>
+        ) : null}
+      </Text>
+      <Text wrap="truncate-end">
+        <Text>{remote.openIssues ?? '?'} issues</Text>
+        {dot}
+        <Text>{remote.openPulls ?? '?'} PRs</Text>
+        {dot}
+        <Text color={remote.assigned.length ? 'cyan' : undefined} dimColor={!remote.assigned.length}>
+          {remote.assigned.length} assigned to you
+        </Text>
+        {dot}
+        <Text color={remote.reviewRequests.length ? 'yellow' : undefined} dimColor={!remote.reviewRequests.length}>
+          {remote.reviewRequests.length} reviews for you
+        </Text>
+        {remote.release ? (
+          <Text>
+            {dot}
+            {remote.release.tag}
+            <Text dimColor>{remote.release.commitsSince ? ` +${remote.release.commitsSince} commits` : ''}</Text>
+          </Text>
+        ) : null}
+      </Text>
+    </Box>
+  )
 }
 
-/** The whole picture: branch, PR, pipeline, deployments, open PRs and issues. */
+type Column = { title: string; width?: number }
+type Cell = { text: string; color?: string; isDim?: boolean; href?: string }
+
 async function drawDetails($: EngineInterface, e: RenderEvent, columns: number) {
-  const { Box, Text, Button } = $.ui.resolve(e)
+  const { Box, Text, Button, Link } = $.ui.resolve(e)
   const { local, remote, updatedAt, isRefreshing } = await read($, snapshot)
   const width = Math.max(20, columns)
-  const ago = updatedAt ? Math.round(((await $.clock.now()) - updatedAt) / 1000) : null
-  const cut = (text: string, room: number) => (text.length > room ? `${text.slice(0, Math.max(1, room - 1))}…` : text)
+  const now = await $.clock.now()
+  const ago = updatedAt ? Math.round((now - updatedAt) / 1000) : null
 
   const heading = (text: string) => (
     <Text bold color="cyan">
       {text}
     </Text>
   )
-  const itemRow = (item: Item) => (
-    <Text wrap="truncate-end">
-      <Text dimColor>#{item.number}</Text> {cut(item.title, width - 8)}
-      {item.isDraft ? <Text dimColor> (draft)</Text> : null}
-    </Text>
+  /** Rows under a dim header, each column `width` cells wide; a column without one takes the rest. */
+  const table = (columns: Column[], rows: Cell[][], empty: string) => (
+    <Box flexDirection="column">
+      <Box>
+        {columns.map(column => (
+          <Box width={column.width} flexGrow={column.width ? 0 : 1} flexShrink={column.width ? 0 : 1} paddingRight={1}>
+            <Text bold dimColor wrap="truncate-end">
+              {column.title}
+            </Text>
+          </Box>
+        ))}
+      </Box>
+      {rows.length === 0 && <Text dimColor>{empty}</Text>}
+      {rows.map(row => (
+        <Box>
+          {columns.map((column, index) => {
+            const cell = row[index] ?? { text: '' }
+
+            return (
+              <Box width={column.width} flexGrow={column.width ? 0 : 1} flexShrink={column.width ? 0 : 1} paddingRight={1}>
+                {cell.href ? (
+                  <Link href={cell.href} label={cell.text} />
+                ) : (
+                  <Text color={cell.color} dimColor={cell.isDim} wrap="truncate-end">
+                    {cell.text}
+                  </Text>
+                )}
+              </Box>
+            )
+          })}
+        </Box>
+      ))}
+    </Box>
   )
+  const itemTable = (items: Item[], empty: string) =>
+    table(
+      [{ title: '#', width: 7 }, { title: 'Title' }, { title: 'Author', width: Math.min(18, Math.max(8, Math.floor(width / 5))) }],
+      items.map(item => [
+        item.url ? { text: `#${item.number}`, href: item.url } : { text: `#${item.number}`, isDim: true },
+        { text: `${item.isPull ? 'PR ' : ''}${item.title}${item.isDraft ? ' (draft)' : ''}` },
+        { text: item.author, isDim: true },
+      ]),
+      empty,
+    )
 
   return (
     <Box flexDirection="column">
@@ -404,8 +673,30 @@ async function drawDetails($: EngineInterface, e: RenderEvent, columns: number) 
                 {remote.pr.isDraft ? <Text dimColor> (draft)</Text> : null}
               </Text>
               <Text dimColor wrap="truncate-end">
-                → {remote.pr.base} · {remote.pr.url}
+                → {remote.pr.base} · <Link href={remote.pr.url} label={remote.pr.url} />
               </Text>
+              {remote.pr.details && (
+                <Box flexDirection="column">
+                  <Text wrap="truncate-end">
+                    <Text dimColor>Review </Text>
+                    <Text color={reviewSummary(remote.pr.details).color}>{reviewSummary(remote.pr.details).text}</Text>
+                  </Text>
+                  <Text wrap="truncate-end">
+                    <Text dimColor>Merge  </Text>
+                    <Text color={mergeSummary(remote.pr.details, remote.pr.base).color}>
+                      {mergeSummary(remote.pr.details, remote.pr.base).text}
+                    </Text>
+                  </Text>
+                  <Text wrap="truncate-end">
+                    <Text dimColor>Diff   </Text>
+                    <Text color="green">+{remote.pr.details.additions}</Text> <Text color="red">−{remote.pr.details.deletions}</Text>
+                    <Text dimColor> · {remote.pr.details.changedFiles} files · </Text>
+                    <Text color={remote.pr.details.unresolvedThreads ? 'yellow' : undefined} dimColor={!remote.pr.details.unresolvedThreads}>
+                      {remote.pr.details.unresolvedThreads} unresolved threads
+                    </Text>
+                  </Text>
+                </Box>
+              )}
             </Box>
           ) : (
             <Text dimColor>No open PR for this branch.</Text>
@@ -413,8 +704,7 @@ async function drawDetails($: EngineInterface, e: RenderEvent, columns: number) 
 
           {heading(remote.pr ? 'Pipeline (PR head)' : 'Pipeline (last push)')}
           {!remote.pipeline && <Text dimColor>No pushed commit to check.</Text>}
-          {remote.pipeline && remote.pipeline.total === 0 && <Text dimColor>No checks on {remote.pipeline.sha.slice(0, 7)}.</Text>}
-          {remote.pipeline && remote.pipeline.total > 0 && (
+          {remote.pipeline && (
             <Box flexDirection="column">
               <Text>
                 <Text color="green">✓{remote.pipeline.passed} </Text>
@@ -437,34 +727,74 @@ async function drawDetails($: EngineInterface, e: RenderEvent, columns: number) 
                   <Text dimColor>n/a (no check reports counts)</Text>
                 )}
               </Text>
-              {remote.pipeline.checks.slice(0, 12).map(check => (
-                <Text wrap="truncate-end">
-                  <Text color={COLOR[check.state]}>{MARK[check.state]}</Text> {check.name}
-                  {check.summary ? <Text dimColor> · {check.summary}</Text> : null}
-                </Text>
-              ))}
+              {table(
+                [
+                  { title: '', width: 2 },
+                  { title: 'Check', width: Math.min(28, Math.floor(width * 0.3)) },
+                  { title: 'Status', width: 9 },
+                  { title: 'Time', width: 12 },
+                  { title: 'Tests', width: 12 },
+                  { title: 'Summary' },
+                  { title: 'Log', width: 5 },
+                ],
+                remote.pipeline.checks.slice(0, 12).map(check => [
+                  { text: MARK[check.state], color: COLOR[check.state] },
+                  { text: check.name },
+                  { text: check.state, color: COLOR[check.state] },
+                  { text: checkTime(check, now), isDim: check.state !== 'running' },
+                  check.tests
+                    ? { text: `${check.tests.passed}✓ ${check.tests.failed}✗`, color: check.tests.failed ? 'red' : 'green' }
+                    : { text: '–', isDim: true },
+                  { text: check.summary ?? '', isDim: true },
+                  check.url ? { text: 'open', href: check.url } : { text: '' },
+                ]),
+                `No checks on ${remote.pipeline.sha.slice(0, 7)}.`,
+              )}
             </Box>
           )}
 
           {heading('Deployments')}
-          {remote.deployments.length === 0 && <Text dimColor>None.</Text>}
-          {remote.deployments.map(one => (
-            <Text wrap="truncate-end">
-              <Text color={DEPLOY_COLOR[one.state]}>{one.state}</Text> {one.environment}
-              <Text dimColor>
-                {' '}
-                · {one.isThisCommit ? 'this commit' : one.ref} · {one.at.slice(0, 16).replace('T', ' ')}
-              </Text>
-            </Text>
-          ))}
+          {table(
+              [{ title: 'Environment', width: 16 }, { title: 'Status', width: 12 }, { title: 'Ref' }, { title: 'When', width: 17 }],
+              remote.deployments.map(one => [
+                { text: one.environment },
+                { text: one.state, color: DEPLOY_COLOR[one.state] },
+                { text: one.isThisCommit ? 'this commit' : one.ref, isDim: !one.isThisCommit },
+                { text: one.at.slice(0, 16).replace('T', ' '), isDim: true },
+              ]),
+              'No deployments.',
+            )}
 
           {heading(`Open pull requests (${remote.openPulls ?? '?'})`)}
-          {remote.pulls.length === 0 && <Text dimColor>None.</Text>}
-          {remote.pulls.map(itemRow)}
+          {itemTable(remote.pulls, 'No open pull requests.')}
 
           {heading(`Open issues (${remote.openIssues ?? '?'})`)}
-          {remote.issues.length === 0 && <Text dimColor>None.</Text>}
-          {remote.issues.map(itemRow)}
+          {itemTable(remote.issues, 'No open issues.')}
+
+          {heading(`Assigned to you (${remote.assigned.length})`)}
+          {itemTable(remote.assigned, 'Nothing assigned to you.')}
+
+          {heading(`Review requested from you (${remote.reviewRequests.length})`)}
+          {itemTable(remote.reviewRequests, 'No reviews requested from you.')}
+
+          {heading('Latest release')}
+          {remote.release ? (
+            <Text wrap="truncate-end">
+              <Link href={remote.release.url} label={remote.release.tag} />
+              <Text dimColor>
+                {remote.release.isRelease ? '' : ' (tag)'}
+                {remote.release.publishedAt ? ` · ${remote.release.publishedAt.slice(0, 10)}` : ''}
+              </Text>
+              {remote.release.commitsSince !== null && (
+                <Text color={remote.release.commitsSince ? 'yellow' : 'green'}>
+                  {' '}
+                  · {remote.release.commitsSince === 0 ? 'nothing new since' : `${remote.release.commitsSince} commits since`}
+                </Text>
+              )}
+            </Text>
+          ) : (
+            <Text dimColor>No release or tag yet.</Text>
+          )}
 
           <Text dimColor>
             {remote.repo}
@@ -481,6 +811,8 @@ export const register: Register = (on, options) => {
   config.refreshMs = Math.max(15, Number(options.refreshSeconds ?? 60)) * 1000
 
   on('session.start', async ($, e, next) => {
+    // earlier versions kept an entry in the status line
+    $.ui.status(undefined)
     await $.command.register({
       name: 'git-status',
       description: 'Show git status, issues, pull requests, CI and deployments (refreshes them)',
@@ -531,17 +863,15 @@ export const register: Register = (on, options) => {
     const { local, remote } = await read($, snapshot)
     if (e.props.hasSurvey || !local) return below
 
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const { Box } = $.ui.resolve(e)
     const isExpanded = await read($, expanded)
-    const columns = e.props.bodyColumns
 
     return (
       <Box flexDirection="column">
-        <Box>
-          <Text wrap="truncate-end">{summary(local, remote)} </Text>
-          <Button key="git-details" label={isExpanded ? 'Less' : 'Git'} onPress={() => update($, expanded, is => !is)} />
+        <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
+          {await drawOverview($, e, local, remote, isExpanded)}
+          {isExpanded ? await drawDetails($, e, e.props.bodyColumns - 4) : null}
         </Box>
-        {isExpanded ? await drawDetails($, e, columns) : null}
         {below}
       </Box>
     )
@@ -556,6 +886,9 @@ function emptyRemote(repo: string | null): Remote {
     issues: [],
     pulls: [],
     pr: null,
+    assigned: [],
+    reviewRequests: [],
+    release: null,
     pipeline: null,
     deployments: [],
     rateRemaining: null,

@@ -1,7 +1,9 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { RenderElement, RenderPropsOf } from 'claude-code'
 
-import { aggregate, checkFromRun, intervalLabel, nextInterval, parseGhResponse, countFromLink, latestPerEnvironment, parsePorcelain, parseRemote, parseTestCounts, verdict } from '../hooks/parse'
+import type { PullDetails } from '../types'
+
+import { aggregate, checkFromRun, checkTime, ciChange, intervalLabel, mergeSummary, nextInterval, parseGhResponse, reviewSummary, countFromLink, latestPerEnvironment, parsePorcelain, parseRemote, parseTestCounts, verdict } from '../hooks/parse'
 
 describe('parsing', () => {
   test('remotes in every spelling', () => {
@@ -74,6 +76,42 @@ describe('parsing', () => {
     expect(parseGhResponse('')).toBe(null)
   })
 
+  test('check times: finished, running, never started', () => {
+    expect(checkTime({ state: 'passed', startedAt: '2026-01-01T00:00:00Z', completedAt: '2026-01-01T01:03:00Z' }, 0)).toBe('1h 3m')
+    expect(checkTime({ state: 'running', startedAt: '2026-01-01T00:00:00Z', completedAt: null }, Date.parse('2026-01-01T00:00:45Z'))).toBe('since 45s')
+    expect(checkTime({ state: 'queued', startedAt: null, completedAt: null }, 0)).toBe('–')
+  })
+
+  test('review and merge state in a few words', () => {
+    const details: PullDetails = {
+      reviewDecision: null,
+      requested: [],
+      reviews: [],
+      mergeable: 'MERGEABLE',
+      mergeState: 'CLEAN',
+      additions: 0,
+      deletions: 0,
+      changedFiles: 0,
+      unresolvedThreads: 0,
+    }
+    expect(reviewSummary({ ...details, reviewDecision: 'APPROVED', reviews: [{ author: 'ann', state: 'APPROVED' }] }).text).toBe('✓ approved by ann')
+    expect(reviewSummary({ ...details, requested: ['bob', 'team'] }).text).toBe('○ waiting for bob, team')
+    expect(mergeSummary(details, 'main').text).toBe('✓ ready to merge')
+    expect(mergeSummary({ ...details, mergeState: 'BEHIND' }, 'main').text).toBe('↓ behind main, update the branch')
+    expect(mergeSummary({ ...details, mergeable: 'CONFLICTING' }, 'main').text).toBe('✗ conflicts with main')
+  })
+
+  test('a toast only when the same commit finishes or breaks', () => {
+    const run = (state: 'running' | 'passed' | 'failed', name = 'e2e') =>
+      checkFromRun({ name, status: state === 'running' ? 'in_progress' : 'completed', conclusion: state === 'passed' ? 'success' : state === 'failed' ? 'failure' : null })
+    const running = aggregate('abc', [run('passed', 'unit'), run('running')])
+    expect(ciChange(running, aggregate('abc', [run('passed', 'unit'), run('passed')]), 'PR #12')).toBe('CI passed ✓ PR #12 (2/2)')
+    expect(ciChange(running, aggregate('abc', [run('passed', 'unit'), run('failed')]), 'PR #12')).toBe('CI failed ✗ PR #12: e2e')
+    expect(ciChange(running, aggregate('abc', [run('passed', 'unit'), run('running')]), 'PR #12')).toBe(null)
+    expect(ciChange(running, aggregate('other', [run('passed')]), 'PR #12')).toBe(null)
+    expect(ciChange(null, running, 'PR #12')).toBe(null)
+  })
+
   test('the auto refresh button cycles off, 30s, 1m, 5m, 15m', () => {
     const seen = [0]
     for (let i = 0; i < 5; i += 1) seen.push(nextInterval(seen[seen.length - 1] ?? 0))
@@ -118,7 +156,26 @@ const GIT: Record<string, string> = {
   remote: 'git@github.com:acme/app.git',
 }
 
+const PULL = {
+  reviewDecision: 'CHANGES_REQUESTED',
+  mergeable: 'CONFLICTING',
+  mergeStateStatus: 'DIRTY',
+  additions: 120,
+  deletions: 45,
+  changedFiles: 8,
+  reviewRequests: { nodes: [{ requestedReviewer: { login: 'dan' } }, { requestedReviewer: null }] },
+  latestReviews: { nodes: [{ author: { login: 'ann' }, state: 'CHANGES_REQUESTED' }] },
+  reviewThreads: { nodes: [{ isResolved: false }, { isResolved: true }, { isResolved: false }] },
+}
+
 const GITHUB: [RegExp, unknown, Record<string, string>?][] = [
+  [/\/search\/issues\?q=.*assignee%3A%40me/, { items: [{ number: 9, title: 'Fix login', user: { login: 'me' }, html_url: 'https://github.com/acme/app/issues/9' }] }],
+  [
+    /\/search\/issues\?q=.*review-requested%3A%40me/,
+    { items: [{ number: 20, title: 'Refactor store', user: { login: 'cat' }, pull_request: {}, html_url: 'https://github.com/acme/app/pull/20' }] },
+  ],
+  [/\/releases\/latest$/, { tag_name: 'v1.4.0', published_at: '2026-09-20T08:00:00Z', html_url: 'https://github.com/acme/app/releases/tag/v1.4.0' }],
+  [/\/compare\/v1\.4\.0\.\.\.cafe123$/, { ahead_by: 3 }],
   [/\/repos\/acme\/app$/, { open_issues_count: 9 }],
   [/\/pulls\?state=open&per_page=1$/, [{}], { Link: '<https://api.github.com/x?per_page=1&page=4>; rel="last"' }],
   [
@@ -133,8 +190,16 @@ const GITHUB: [RegExp, unknown, Record<string, string>?][] = [
     /\/commits\/cafe123\/check-runs/,
     {
       check_runs: [
-        { name: 'unit tests', status: 'completed', conclusion: 'success', output: { title: '128 passed, 2 skipped' } },
-        { name: 'e2e', status: 'in_progress', conclusion: null, output: {} },
+        {
+          name: 'unit tests',
+          status: 'completed',
+          conclusion: 'success',
+          output: { title: '128 passed, 2 skipped' },
+          html_url: 'https://github.com/acme/app/actions/runs/1/job/2',
+          started_at: '1970-01-01T00:00:00Z',
+          completed_at: '1970-01-01T00:02:14Z',
+        },
+        { name: 'e2e', status: 'in_progress', conclusion: null, output: {}, started_at: '1970-01-01T00:12:00Z', completed_at: null },
       ],
     },
   ],
@@ -153,6 +218,7 @@ test('the pane shows branch, PR, pipeline, tests, deployments, issues and PRs', 
     if (e.argv[0] === 'git') return ran(0, GIT[e.argv[1] ?? ''] ?? '')
     if (e.argv[0] !== 'gh') throw new Error('not installed')
     if (e.argv[1] === 'auth') return ran(0, '')
+    if (e.argv[2] === 'graphql') return ran(0, JSON.stringify({ data: { repository: { pullRequest: PULL } } }))
 
     const path = e.argv[3] ?? ''
     asked.push(path)
@@ -167,6 +233,8 @@ test('the pane shows branch, PR, pipeline, tests, deployments, issues and PRs', 
     const ui = await $.ui.mount({ ...PANE, surface })
     await ui.press({ key: "refresh" })
 
+    expect(await ui.find({ type: 'Link', text: /^open$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Link', text: /^v1\.4\.0$/ })).toBeDefined()
     for (const text of [
       /feature\/x/,
       /#12/,
@@ -178,6 +246,24 @@ test('the pane shows branch, PR, pipeline, tests, deployments, issues and PRs', 
       /Open issues \(5\)/,
       /Crash on start/,
       /4990 API calls left/,
+      /changes requested by ann/,
+      /conflicts with main/,
+      /^\+120$/,
+      /8 files/,
+      /2 unresolved threads/,
+      /^2m 14s$/,
+      /^since 4m 40s$/,
+      /^Time$/,
+      /Fix login/,
+      /PR Refactor store/,
+      /Assigned to you \(1\)/,
+      /Review requested from you \(1\)/,
+      /3 commits since/,
+      /^Author$/,
+      /^ann$/,
+      /^128✓ 0✗$/,
+      /^Environment$/,
+      /^this commit$/,
     ]) {
       expect(await ui.find({ type: 'Text', text })).toBeDefined()
     }
@@ -187,7 +273,14 @@ test('the pane shows branch, PR, pipeline, tests, deployments, issues and PRs', 
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const band = await $.ui.mount({ ...BAND, surface })
-    expect(await band.find({ type: 'Text', text: /⎇ feature\/x ↑1 .*PR #12 · CI ● 1\/2 \(1 running\) · Tests 128✓ 0✗ · preview: success · 5 issues · 4 PRs/ })).toBeDefined()
+    for (const text of [
+      /^⎇ feature\/x → origin\/feature\/x ↑1 · ●0 ✚0 \?1 · 1111111 add the thing/,
+      /^PR #12 Add pane → main · ✗ changes requested by ann · ✗ conflicts with main · \+120 −45 · 2 open threads$/,
+      /^CI ● running 1\/2 \(1 running\) · Tests 128✓ 0✗ 2 skipped · preview: success$/,
+      /^5 issues · 4 PRs · 1 assigned to you · 1 reviews for you · v1\.4\.0 \+3 commits$/,
+    ]) {
+      expect(await band.find({ type: 'Text', text })).toBeDefined()
+    }
     expect(await band.find({ type: 'Text', text: /Crash on start/ })).toBeUndefined()
     expect(await band.find({ key: 'auto' })).toBeUndefined()
     await band.press({ key: 'git-details' })
@@ -243,5 +336,25 @@ test('a gh that is not logged in says so', async ($, on) => {
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'refresh' })
   expect(await ui.find({ type: 'Text', text: /gh is not logged in: run gh auth login/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('empty sections still show their tables', async ($, on) => {
+  mock.clock(on)
+  on('process.run', async (_$, e) => {
+    if (e.argv[0] === 'git') return ran(0, GIT[e.argv[1] ?? ''] ?? '')
+    if (e.argv[1] === 'auth') return ran(0, '')
+    const path = e.argv[3] ?? ''
+    const body = /\/repos\/acme\/app$/.test(path) ? { open_issues_count: 0 } : /check-runs/.test(path) ? { check_runs: [] } : /\/status/.test(path) ? { statuses: [] } : []
+
+    return ran(0, `HTTP/2.0 200 OK\r\n\r\n${JSON.stringify(body)}`)
+  })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'refresh' })
+  for (const text of [/^Environment$/, /^No deployments\.$/, /^No open pull requests\.$/, /^No open issues\.$/, /^No checks on 0000000\.$/, /^Check$/]) {
+    expect(await ui.find({ type: 'Text', text })).toBeDefined()
+  }
+  expect((await ui.findAll({ type: 'Text', text: /^Author$/ })).length).toBe(4)
   await ui.unmount()
 })

@@ -1,4 +1,4 @@
-import type { Check, Deployment, LocalStatus, Pipeline, TestCounts } from '../types'
+import type { Check, Deployment, LocalStatus, PullDetails, Pipeline, TestCounts } from '../types'
 
 /** `owner/name` of a GitHub remote URL in any of its spellings, or null. */
 export function parseRemote(url: string): string | null {
@@ -81,15 +81,34 @@ type CheckRun = {
   status: string
   conclusion: string | null
   output?: { title?: string | null; summary?: string | null }
+  html_url?: string | null
+  details_url?: string | null
+  started_at?: string | null
+  completed_at?: string | null
 }
 
-type CommitStatus = { context: string; state: string; description: string | null }
+type CommitStatus = {
+  context: string
+  state: string
+  description: string | null
+  target_url?: string | null
+  created_at?: string
+  updated_at?: string
+}
 
 export function checkFromRun(run: CheckRun): Check {
   const summary = run.output?.title || null
   const tests = parseTestCounts(run.output?.title) ?? parseTestCounts(run.output?.summary)
 
-  return { name: run.name, state: stateOfRun(run), summary, tests }
+  return {
+    name: run.name,
+    state: stateOfRun(run),
+    summary,
+    tests,
+    url: safeUrl(run.html_url) ?? safeUrl(run.details_url),
+    startedAt: run.started_at ?? null,
+    completedAt: run.completed_at ?? null,
+  }
 }
 
 function stateOfRun(run: CheckRun): Check['state'] {
@@ -114,7 +133,15 @@ function stateOfRun(run: CheckRun): Check['state'] {
 export function checkFromStatus(status: CommitStatus): Check {
   const state: Check['state'] = status.state === 'success' ? 'passed' : status.state === 'pending' ? 'running' : 'failed'
 
-  return { name: status.context, state, summary: status.description, tests: parseTestCounts(status.description) }
+  return {
+    name: status.context,
+    state,
+    summary: status.description,
+    tests: parseTestCounts(status.description),
+    url: safeUrl(status.target_url),
+    startedAt: status.created_at ?? null,
+    completedAt: state === 'running' ? null : (status.updated_at ?? null),
+  }
 }
 
 /** The checks of one commit, added up. */
@@ -207,4 +234,112 @@ export function parseGhResponse(text: string): { status: number; headers: Record
   }
 
   return { status: Number(status[1]), headers, body }
+}
+
+/** An https URL a Link may carry, or null. */
+export function safeUrl(url: string | null | undefined): string | null {
+  if (!url) return null
+  try {
+    const parsed = new URL(url)
+
+    return parsed.protocol === 'https:' && !parsed.username ? parsed.href : null
+  } catch {
+    return null
+  }
+}
+
+/** `45s`, `2m 14s`, `1h 3m`. */
+export function formatDuration(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`
+
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+}
+
+/** How long a check took, or for how long it has been running. */
+export function checkTime(check: Pick<Check, 'state' | 'startedAt' | 'completedAt'>, now: number): string {
+  const started = check.startedAt ? Date.parse(check.startedAt) : NaN
+  if (Number.isNaN(started)) return '–'
+  if (check.state === 'running') return `since ${formatDuration(now - started)}`
+  const completed = check.completedAt ? Date.parse(check.completedAt) : NaN
+
+  return Number.isNaN(completed) ? '–' : formatDuration(completed - started)
+}
+
+type GraphPull = {
+  reviewDecision: PullDetails['reviewDecision']
+  mergeable: PullDetails['mergeable']
+  mergeStateStatus: string
+  additions: number
+  deletions: number
+  changedFiles: number
+  reviewRequests: { nodes: { requestedReviewer: { login?: string; name?: string } | null }[] }
+  latestReviews: { nodes: { author: { login: string } | null; state: string }[] }
+  reviewThreads: { nodes: { isResolved: boolean }[] }
+}
+
+export function pullDetailsOf(pull: GraphPull): PullDetails {
+  return {
+    reviewDecision: pull.reviewDecision,
+    requested: pull.reviewRequests.nodes
+      .map(node => node.requestedReviewer?.login ?? node.requestedReviewer?.name)
+      .filter((name): name is string => Boolean(name)),
+    reviews: pull.latestReviews.nodes.map(node => ({ author: node.author?.login ?? '?', state: node.state })),
+    mergeable: pull.mergeable,
+    mergeState: pull.mergeStateStatus,
+    additions: pull.additions,
+    deletions: pull.deletions,
+    changedFiles: pull.changedFiles,
+    unresolvedThreads: pull.reviewThreads.nodes.filter(node => !node.isResolved).length,
+  }
+}
+
+export type Said = { text: string; color?: string }
+
+/** Where the reviews stand, in a few words. */
+export function reviewSummary(details: PullDetails): Said {
+  const by = (state: string) => details.reviews.filter(review => review.state === state).map(review => review.author)
+
+  if (details.reviewDecision === 'CHANGES_REQUESTED') {
+    return { text: `✗ changes requested by ${by('CHANGES_REQUESTED').join(', ') || '?'}`, color: 'red' }
+  }
+  if (details.reviewDecision === 'APPROVED') return { text: `✓ approved by ${by('APPROVED').join(', ') || '?'}`, color: 'green' }
+  if (details.requested.length > 0) return { text: `○ waiting for ${details.requested.join(', ')}`, color: 'yellow' }
+  if (details.reviewDecision === 'REVIEW_REQUIRED') return { text: '○ review required, nobody requested', color: 'yellow' }
+
+  return { text: details.reviews.length > 0 ? `${details.reviews.length} reviews, none required` : 'no reviews' }
+}
+
+/** Whether the PR can merge, and if not why. */
+export function mergeSummary(details: PullDetails, base: string): Said {
+  if (details.mergeable === 'CONFLICTING' || details.mergeState === 'DIRTY') return { text: `✗ conflicts with ${base}`, color: 'red' }
+  switch (details.mergeState) {
+    case 'CLEAN':
+    case 'HAS_HOOKS':
+      return { text: '✓ ready to merge', color: 'green' }
+    case 'BEHIND':
+      return { text: `↓ behind ${base}, update the branch`, color: 'yellow' }
+    case 'BLOCKED':
+      return { text: '■ blocked (required reviews or checks)', color: 'yellow' }
+    case 'UNSTABLE':
+      return { text: '● mergeable, but checks are failing', color: 'yellow' }
+    case 'DRAFT':
+      return { text: '◌ draft', color: undefined }
+    default:
+      return { text: '… GitHub is still working it out' }
+  }
+}
+
+/** The toast for a pipeline that changed state on the same commit, or null. */
+export function ciChange(before: Pipeline | null, after: Pipeline | null, label: string): string | null {
+  if (!before || !after || before.sha !== after.sha) return null
+  const was = verdict(before)
+  const now = verdict(after)
+  if (was === now || now === 'running' || now === 'none') return null
+  if (now === 'passed') return `CI passed ✓ ${label} (${after.passed}/${after.total})`
+  const failed = after.checks.filter(check => check.state === 'failed').map(check => check.name)
+
+  return `CI failed ✗ ${label}: ${failed.slice(0, 3).join(', ')}${failed.length > 3 ? ` +${failed.length - 3}` : ''}`
 }

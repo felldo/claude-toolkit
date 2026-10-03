@@ -13,7 +13,7 @@ export type LocalStatus = {
   lastCommit: string | null
 }
 
-export type Item = { number: number; title: string; author: string; isDraft?: boolean }
+export type Item = { number: number; title: string; author: string; isDraft?: boolean; isPull?: boolean; url?: string }
 
 export type TestCounts = { passed: number; failed: number; skipped: number }
 
@@ -22,6 +22,9 @@ export type Check = {
   state: 'queued' | 'running' | 'passed' | 'failed' | 'skipped' | 'neutral'
   summary: string | null
   tests: TestCounts | null
+  url: string | null
+  startedAt: string | null
+  completedAt: string | null
 }
 
 export type Pipeline = {
@@ -45,7 +48,24 @@ export type Deployment = {
   at: string
 }
 
-export type PullRequest = Item & { url: string; headSha: string; base: string }
+export type Review = { author: string; state: string }
+
+/** What GraphQL says about the PR beyond the REST list: reviews, merge state and size. */
+export type PullDetails = {
+  reviewDecision: 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null
+  requested: string[]
+  reviews: Review[]
+  mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN'
+  mergeState: string
+  additions: number
+  deletions: number
+  changedFiles: number
+  unresolvedThreads: number
+}
+
+export type PullRequest = Item & { url: string; headSha: string; base: string; details: PullDetails | null }
+
+export type Release = { tag: string; isRelease: boolean; publishedAt: string | null; url: string; commitsSince: number | null }
 
 export type Remote = {
   repo: string | null
@@ -54,6 +74,9 @@ export type Remote = {
   issues: Item[]
   pulls: Item[]
   pr: PullRequest | null
+  assigned: Item[]
+  reviewRequests: Item[]
+  release: Release | null
   pipeline: Pipeline | null
   deployments: Deployment[]
   rateRemaining: number | null
