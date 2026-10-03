@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderInput } from 'claude-code'
+import type { EngineInterface, Register, RenderElement, RenderInput } from 'claude-code'
 
 type RenderEvent = RenderInput<'Pane' | 'AbovePrompt'>
 
@@ -426,51 +426,103 @@ async function cycleInterval($: EngineInterface) {
 }
 
 
-/** The whole picture: branch, PR, pipeline, deployments, open PRs and issues. */
 /** The band above the prompt: a few colored lines on branch, PR, pipeline and repository, with the toggle for the details. */
-async function drawOverview($: EngineInterface, e: RenderInput<'AbovePrompt'>, local: LocalStatus, remote: Remote | null, isExpanded: boolean) {
+async function drawOverview(
+  $: EngineInterface,
+  e: RenderInput<'AbovePrompt'>,
+  local: LocalStatus,
+  remote: Remote | null,
+  isExpanded: boolean,
+  width: number,
+) {
   const { Box, Text, Button } = $.ui.resolve(e)
   const pr = remote?.pr ?? null
   const details = pr?.details ?? null
   const pipeline = remote?.pipeline ?? null
   const dot = <Text dimColor> · </Text>
   const toggle = <Button key="git-details" label={isExpanded ? 'Less' : 'Git'} onPress={() => update($, expanded, is => !is)} />
+  const rule = <Text dimColor>{'─'.repeat(Math.max(0, width))}</Text>
+  /** A colored tag in a fixed column, so the lines start aligned. */
+  const label = (text: string, color: string) => (
+    <Box width={8} flexShrink={0}>
+      <Text bold color={color}>
+        {text}
+      </Text>
+    </Box>
+  )
+
+  /**
+   * Pieces side by side after the label; a piece that no longer fits moves whole
+   * to the next line instead of being cut, and only one wider than the line is shortened.
+   */
+  const flow = (pieces: (RenderElement | null | undefined | false | 0 | '')[]) => {
+    const shown = pieces.filter(piece => !!piece)
+    return (
+      <Box flexWrap="wrap" flexGrow={1} flexShrink={1}>
+        {shown.map((piece, index) => (
+          <Box flexShrink={1}>
+            <Text wrap="truncate-end">
+              {index > 0 ? dot : null}
+              {piece}
+            </Text>
+          </Box>
+        ))}
+      </Box>
+    )
+  }
 
   const branchLine = (
     <Box>
-      <Text wrap="truncate-end">
-        ⎇ <Text bold>{local.branch ?? `detached ${local.sha?.slice(0, 7) ?? ''}`}</Text>
-        {local.upstream ? <Text dimColor> → {local.upstream}</Text> : <Text dimColor> (not pushed)</Text>}
-        {local.ahead ? <Text color="yellow"> ↑{local.ahead}</Text> : null}
-        {local.behind ? <Text color="yellow"> ↓{local.behind}</Text> : null}
-        {dot}
-        <Text color={local.staged ? 'green' : undefined} dimColor={!local.staged}>
-          ●{local.staged}
-        </Text>{' '}
-        <Text color={local.modified ? 'yellow' : undefined} dimColor={!local.modified}>
-          ✚{local.modified}
-        </Text>{' '}
-        <Text dimColor>?{local.untracked}</Text>
-        {local.conflicted ? <Text color="red"> ✗{local.conflicted} conflicts</Text> : null}
-        {local.lastCommit ? (
+      {label('BRANCH', 'magenta')}
+      {flow([
+        <Text>
+          ⎇ <Text bold>{local.branch ?? `detached ${local.sha?.slice(0, 7) ?? ''}`}</Text>
+          {local.upstream ? <Text dimColor> → {local.upstream}</Text> : <Text dimColor> (not pushed)</Text>}
+          {local.ahead ? <Text color="yellow"> ↑{local.ahead}</Text> : null}
+          {local.behind ? <Text color="yellow"> ↓{local.behind}</Text> : null}
+        </Text>,
+        <Text>
+          <Text color={local.staged ? 'green' : undefined} dimColor={!local.staged}>
+            ●{local.staged}
+          </Text>{' '}
+          <Text color={local.modified ? 'yellow' : undefined} dimColor={!local.modified}>
+            ✚{local.modified}
+          </Text>{' '}
+          <Text dimColor>?{local.untracked}</Text>
+          {local.conflicted ? <Text color="red"> ✗{local.conflicted} conflicts</Text> : null}
+        </Text>,
+        local.lastCommit && (
           <Text dimColor>
-            {' · '}
             {local.sha?.slice(0, 7)} {local.lastCommit}
           </Text>
-        ) : null}{' '}
-      </Text>
-      {toggle}
+        ),
+      ])}
+      <Box flexShrink={0} paddingLeft={1}>
+        {toggle}
+      </Box>
     </Box>
   )
-  if (isExpanded || !remote) return branchLine
+  if (!remote) return branchLine
+  if (isExpanded) {
+    return (
+      <Box flexDirection="column">
+        {branchLine}
+        {rule}
+      </Box>
+    )
+  }
 
   if (remote.error || !remote.repo) {
     return (
       <Box flexDirection="column">
         {branchLine}
-        <Text color={remote.error ? 'red' : undefined} dimColor={!remote.error} wrap="truncate-end">
-          {remote.error ?? 'No GitHub remote (set the repo option to choose one).'}
-        </Text>
+        {rule}
+        <Box>
+          {label('GITHUB', remote.error ? 'red' : 'gray')}
+          <Text color={remote.error ? 'red' : undefined} dimColor={!remote.error} wrap="wrap">
+            {remote.error ?? 'No GitHub remote (set the repo option to choose one).'}
+          </Text>
+        </Box>
       </Box>
     )
   }
@@ -484,83 +536,76 @@ async function drawOverview($: EngineInterface, e: RenderInput<'AbovePrompt'>, l
   return (
     <Box flexDirection="column">
       {branchLine}
+      {rule}
       {pr && (
-        <Text wrap="truncate-end">
-          <Text bold>PR #{pr.number}</Text> {pr.title}
-          {pr.isDraft ? <Text dimColor> (draft)</Text> : null}
-          <Text dimColor> → {pr.base}</Text>
-          {review ? (
+        <Box>
+          {label('PR', 'blue')}
+          {flow([
             <Text>
-              {dot}
-              <Text color={review.color}>{review.text}</Text>
-            </Text>
-          ) : null}
-          {merge ? (
-            <Text>
-              {dot}
-              <Text color={merge.color}>{merge.text}</Text>
-            </Text>
-          ) : null}
-          {details ? (
-            <Text>
-              {dot}
-              <Text color="green">+{details.additions}</Text> <Text color="red">−{details.deletions}</Text>
-              {details.unresolvedThreads ? <Text color="yellow"> · {details.unresolvedThreads} open threads</Text> : null}
-            </Text>
-          ) : null}
-          {dot}
-          {!pipeline || word === 'none' ? (
-            <Text dimColor>no checks</Text>
-          ) : (
-            <Text>
-              <Text color={word === 'failed' ? 'red' : word === 'running' ? 'yellow' : 'green'}>
-                CI {word === 'failed' ? '✗' : word === 'running' ? '●' : '✓'} {pipeline.passed}/{pipeline.total}
+              <Text bold>#{pr.number}</Text> {pr.title}
+              {pr.isDraft ? <Text dimColor> (draft)</Text> : null}
+              <Text dimColor> → {pr.base}</Text>
+            </Text>,
+            review && <Text color={review.color}>{review.text}</Text>,
+            merge && <Text color={merge.color}>{merge.text}</Text>,
+            details && (
+              <Text>
+                <Text color="green">+{details.additions}</Text> <Text color="red">−{details.deletions}</Text>
               </Text>
-              {failed.length ? (
-                <Text color="red">
-                  {' '}
-                  ✗ {failed.slice(0, 3).join(', ')}
-                  {failed.length > 3 ? ` +${failed.length - 3}` : ''}
+            ),
+            details?.unresolvedThreads ? <Text color="yellow">{details.unresolvedThreads} open threads</Text> : null,
+            !pipeline || word === 'none' ? (
+              <Text dimColor>no checks</Text>
+            ) : (
+              <Text>
+                <Text bold color="black" backgroundColor={word === 'failed' ? 'red' : word === 'running' ? 'yellow' : 'green'}>
+                  {' '}CI {word === 'failed' ? '✗' : word === 'running' ? '●' : '✓'} {pipeline.passed}/{pipeline.total}{' '}
                 </Text>
-              ) : null}
-              {pipeline.tests ? (
-                <Text>
-                  {dot}Tests <Text color="green">{pipeline.tests.passed}✓</Text>{' '}
-                  <Text color={pipeline.tests.failed ? 'red' : undefined} dimColor={!pipeline.tests.failed}>
-                    {pipeline.tests.failed}✗
+                {failed.length ? (
+                  <Text color="red">
+                    {' '}
+                    ✗ {failed.slice(0, 3).join(', ')}
+                    {failed.length > 3 ? ` +${failed.length - 3}` : ''}
                   </Text>
+                ) : null}
+              </Text>
+            ),
+            pipeline?.tests && (
+              <Text>
+                Tests <Text color="green">{pipeline.tests.passed}✓</Text>{' '}
+                <Text color={pipeline.tests.failed ? 'red' : undefined} dimColor={!pipeline.tests.failed}>
+                  {pipeline.tests.failed}✗
                 </Text>
-              ) : null}
-            </Text>
-          )}
-          {deployment ? (
-            <Text>
-              {dot}
-              {deployment.environment}: <Text color={DEPLOY_COLOR[deployment.state]}>{deployment.state}</Text>
-            </Text>
-          ) : null}
-        </Text>
+              </Text>
+            ),
+            deployment && (
+              <Text>
+                {deployment.environment}: <Text color={DEPLOY_COLOR[deployment.state]}>{deployment.state}</Text>
+              </Text>
+            ),
+          ])}
+        </Box>
       )}
-      <Text wrap="truncate-end">
-        <Text>{remote.openIssues ?? '?'} issues</Text>
-        {dot}
-        <Text>{remote.openPulls ?? '?'} PRs</Text>
-        {dot}
-        <Text color={remote.assigned.length ? 'cyan' : undefined} dimColor={!remote.assigned.length}>
-          {remote.assigned.length} assigned to you
-        </Text>
-        {dot}
-        <Text color={remote.reviewRequests.length ? 'yellow' : undefined} dimColor={!remote.reviewRequests.length}>
-          {remote.reviewRequests.length} reviews for you
-        </Text>
-        {remote.release ? (
-          <Text>
-            {dot}
-            {remote.release.tag}
-            <Text dimColor>{remote.release.commitsSince ? ` +${remote.release.commitsSince} commits` : ''}</Text>
-          </Text>
-        ) : null}
-      </Text>
+      {pr && rule}
+      <Box>
+        {label('REPO', 'cyan')}
+        {flow([
+          <Text>{remote.openIssues ?? '?'} issues</Text>,
+          <Text>{remote.openPulls ?? '?'} PRs</Text>,
+          <Text color={remote.assigned.length ? 'cyan' : undefined} dimColor={!remote.assigned.length}>
+            {remote.assigned.length} assigned to you
+          </Text>,
+          <Text color={remote.reviewRequests.length ? 'yellow' : undefined} dimColor={!remote.reviewRequests.length}>
+            {remote.reviewRequests.length} reviews for you
+          </Text>,
+          remote.release && (
+            <Text>
+              {remote.release.tag}
+              <Text dimColor>{remote.release.commitsSince ? ` +${remote.release.commitsSince} commits` : ''}</Text>
+            </Text>
+          ),
+        ])}
+      </Box>
     </Box>
   )
 }
@@ -575,6 +620,14 @@ async function drawDetails($: EngineInterface, e: RenderEvent, columns: number) 
   const now = await $.clock.now()
   const ago = updatedAt ? Math.round((now - updatedAt) / 1000) : null
 
+  /** Opens in the browser: blue, underlined and an arrow, which shows even where the terminal cannot underline. */
+  const link = (href: string, text: string) => (
+    <Link href={href}>
+      <Text color="blue" underline>
+        {text} ↗
+      </Text>
+    </Link>
+  )
   const heading = (text: string) => (
     <Text bold color="cyan">
       {text}
@@ -601,7 +654,7 @@ async function drawDetails($: EngineInterface, e: RenderEvent, columns: number) 
             return (
               <Box width={column.width} flexGrow={column.width ? 0 : 1} flexShrink={column.width ? 0 : 1} paddingRight={1}>
                 {cell.href ? (
-                  <Link href={cell.href} label={cell.text} />
+                  link(cell.href, cell.text)
                 ) : (
                   <Text color={cell.color} dimColor={cell.isDim} wrap="truncate-end">
                     {cell.text}
@@ -616,7 +669,7 @@ async function drawDetails($: EngineInterface, e: RenderEvent, columns: number) 
   )
   const itemTable = (items: Item[], empty: string) =>
     table(
-      [{ title: '#', width: 7 }, { title: 'Title' }, { title: 'Author', width: Math.min(18, Math.max(8, Math.floor(width / 5))) }],
+      [{ title: '#', width: 9 }, { title: 'Title' }, { title: 'Author', width: Math.min(18, Math.max(8, Math.floor(width / 5))) }],
       items.map(item => [
         item.url ? { text: `#${item.number}`, href: item.url } : { text: `#${item.number}`, isDim: true },
         { text: `${item.isPull ? 'PR ' : ''}${item.title}${item.isDraft ? ' (draft)' : ''}` },
@@ -672,7 +725,7 @@ async function drawDetails($: EngineInterface, e: RenderEvent, columns: number) 
                 {remote.pr.isDraft ? <Text dimColor> (draft)</Text> : null}
               </Text>
               <Text dimColor wrap="truncate-end">
-                → {remote.pr.base} · <Link href={remote.pr.url} label={remote.pr.url} />
+                → {remote.pr.base} · {link(remote.pr.url, remote.pr.url)}
               </Text>
               {remote.pr.details && (
                 <Box flexDirection="column">
@@ -733,7 +786,7 @@ async function drawDetails($: EngineInterface, e: RenderEvent, columns: number) 
                   { title: 'Time', width: 12 },
                   { title: 'Tests', width: 12 },
                   { title: 'Summary' },
-                  { title: 'Log', width: 5 },
+                  { title: 'Log', width: 7 },
                 ],
                 remote.pipeline.checks.slice(0, 12).map(check => [
                   { text: MARK[check.state], color: COLOR[check.state] },
@@ -744,15 +797,15 @@ async function drawDetails($: EngineInterface, e: RenderEvent, columns: number) 
                     ? { text: `${check.tests.passed}✓ ${check.tests.failed}✗`, color: check.tests.failed ? 'red' : 'green' }
                     : { text: '–', isDim: true },
                   { text: check.summary ?? '', isDim: true },
-                  check.url ? { text: 'open', href: check.url } : { text: '' },
+                  check.url ? { text: 'log', href: check.url } : { text: '' },
                 ]),
                 `No checks on ${remote.pipeline.sha.slice(0, 7)}.`,
               )}
             </Box>
           )}
 
-          {heading('Deployments')}
-          {table(
+          {heading(`Deployments (${remote.deployments.length})`)}
+          {remote.deployments.length > 0 && table(
               [{ title: 'Environment', width: 16 }, { title: 'Status', width: 12 }, { title: 'Ref' }, { title: 'When', width: 17 }],
               remote.deployments.map(one => [
                 { text: one.environment },
@@ -764,21 +817,21 @@ async function drawDetails($: EngineInterface, e: RenderEvent, columns: number) 
             )}
 
           {heading(`Open pull requests (${remote.openPulls ?? '?'})`)}
-          {itemTable(remote.pulls, 'No open pull requests.')}
+          {remote.pulls.length > 0 && itemTable(remote.pulls, 'No open pull requests.')}
 
           {heading(`Open issues (${remote.openIssues ?? '?'})`)}
-          {itemTable(remote.issues, 'No open issues.')}
+          {remote.issues.length > 0 && itemTable(remote.issues, 'No open issues.')}
 
           {heading(`Assigned to you (${remote.assigned.length})`)}
-          {itemTable(remote.assigned, 'Nothing assigned to you.')}
+          {remote.assigned.length > 0 && itemTable(remote.assigned, 'Nothing assigned to you.')}
 
           {heading(`Review requested from you (${remote.reviewRequests.length})`)}
-          {itemTable(remote.reviewRequests, 'No reviews requested from you.')}
+          {remote.reviewRequests.length > 0 && itemTable(remote.reviewRequests, 'No reviews requested from you.')}
 
-          {heading('Latest release')}
-          {remote.release ? (
+          {heading(remote.release ? 'Latest release' : 'Latest release (none)')}
+          {remote.release && (
             <Text wrap="truncate-end">
-              <Link href={remote.release.url} label={remote.release.tag} />
+              {link(remote.release.url, remote.release.tag)}
               <Text dimColor>
                 {remote.release.isRelease ? '' : ' (tag)'}
                 {remote.release.publishedAt ? ` · ${remote.release.publishedAt.slice(0, 10)}` : ''}
@@ -790,8 +843,6 @@ async function drawDetails($: EngineInterface, e: RenderEvent, columns: number) 
                 </Text>
               )}
             </Text>
-          ) : (
-            <Text dimColor>No release or tag yet.</Text>
           )}
 
           <Text dimColor>
@@ -863,12 +914,16 @@ export const register: Register = (on, options) => {
 
     const { Box } = $.ui.resolve(e)
     const isExpanded = await read($, expanded)
+    const inner = e.props.bodyColumns - 4
+    // the frame takes the PR's CI color, gray without a PR or checks
+    const word = remote?.pr && remote.pipeline ? verdict(remote.pipeline) : 'none'
+    const frame = word === 'failed' ? 'red' : word === 'running' ? 'yellow' : word === 'none' ? 'gray' : 'green'
 
     return (
       <Box flexDirection="column">
-        <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
-          {await drawOverview($, e, local, remote, isExpanded)}
-          {isExpanded ? await drawDetails($, e, e.props.bodyColumns - 4) : null}
+        <Box flexDirection="column" borderStyle="round" borderColor={frame} paddingX={1}>
+          {await drawOverview($, e, local, remote, isExpanded, inner)}
+          {isExpanded ? await drawDetails($, e, inner) : null}
         </Box>
         {below}
       </Box>

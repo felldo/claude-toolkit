@@ -1,6 +1,7 @@
 {
   "name": "git-status",
   "version": "0.1.0",
+  "license": "MIT",
   "description": "Git status above the prompt: branch, open issues and pull requests, and the CI checks, test counts and deployments of your PR (needs the GitHub CLI, gh)",
   "author": {
     "name": "Dominic Fellbaum"

@@ -233,8 +233,10 @@ test('the pane shows branch, PR, pipeline, tests, deployments, issues and PRs', 
     const ui = await $.ui.mount({ ...PANE, surface })
     await ui.press({ key: "refresh" })
 
-    expect(await ui.find({ type: 'Link', text: /^open$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Link', text: /^v1\.4\.0$/ })).toBeDefined()
+    // links read blue, underlined and with an arrow
+    expect(await ui.find({ type: 'Text', text: /^log ↗$/ })).toBeDefined()
+    expect((await ui.findAll({ type: 'Link' })).length).toBe(5)
+    expect(await ui.find({ type: 'Text', text: /^v1\.4\.0 ↗$/ })).toBeDefined()
     for (const text of [
       /feature\/x/,
       /#12/,
@@ -274,9 +276,27 @@ test('the pane shows branch, PR, pipeline, tests, deployments, issues and PRs', 
   for (const surface of ['terminal', 'desktop'] as const) {
     const band = await $.ui.mount({ ...BAND, surface })
     for (const text of [
-      /^⎇ feature\/x → origin\/feature\/x ↑1 · ●0 ✚0 \?1 · 1111111 add the thing/,
-      /^PR #12 Add pane → main · ✗ changes requested by ann · ✗ conflicts with main · \+120 −45 · 2 open threads · CI ● 1\/2 · Tests 128✓ 0✗ · preview: success$/,
-      /^5 issues · 4 PRs · 1 assigned to you · 1 reviews for you · v1\.4\.0 \+3 commits$/,
+      // each piece is drawn whole, so a narrow terminal moves it to the next line instead of cutting it
+      /^⎇ feature\/x → origin\/feature\/x ↑1$/,
+      /^ · ●0 ✚0 \?1$/,
+      /^ · 1111111 add the thing$/,
+      /^#12 Add pane → main$/,
+      /^ · ✗ changes requested by ann$/,
+      /^ · ✗ conflicts with main$/,
+      /^ · \+120 −45$/,
+      /^ · 2 open threads$/,
+      /^ · {2}CI ● 1\/2 $/,
+      /^ · Tests 128✓ 0✗$/,
+      /^ · preview: success$/,
+      /^5 issues$/,
+      /^ · 4 PRs$/,
+      /^ · 1 assigned to you$/,
+      /^ · 1 reviews for you$/,
+      /^ · v1\.4\.0 \+3 commits$/,
+      /^BRANCH$/,
+      /^PR$/,
+      /^REPO$/,
+      /^─+$/,
     ]) {
       expect(await band.find({ type: 'Text', text })).toBeDefined()
     }
@@ -338,7 +358,7 @@ test('a gh that is not logged in says so', async ($, on) => {
   await ui.unmount()
 })
 
-test('empty sections still show their tables', async ($, on) => {
+test('empty sections keep their title, not their table', async ($, on) => {
   mock.clock(on)
   on('ui.render', { component: 'AbovePrompt' }, async () => h('Box', null) as RenderElement)
   on('process.run', async (_$, e) => {
@@ -352,17 +372,26 @@ test('empty sections still show their tables', async ($, on) => {
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'refresh' })
-  for (const text of [/^Environment$/, /^No deployments\.$/, /^No open pull requests\.$/, /^No open issues\.$/, /^Nothing assigned to you\.$/]) {
+  for (const text of [
+    /^Deployments \(0\)$/,
+    /^Open pull requests \(0\)$/,
+    /^Open issues \(0\)$/,
+    /^Assigned to you \(0\)$/,
+    /^Review requested from you \(0\)$/,
+    /^Latest release \(none\)$/,
+  ]) {
     expect(await ui.find({ type: 'Text', text })).toBeDefined()
   }
-  expect((await ui.findAll({ type: 'Text', text: /^Author$/ })).length).toBe(4)
+  for (const text of [/^Environment$/, /^Author$/, /^No deployments/, /^No open (issues|pull requests)\./, /^Nothing assigned/, /^No release/]) {
+    expect(await ui.find({ type: 'Text', text })).toBeUndefined()
+  }
   // no PR on this branch: no pipeline
   expect(await ui.find({ type: 'Text', text: /^Pipeline$/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^Check$/ })).toBeUndefined()
   await ui.unmount()
 
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect(await band.find({ type: 'Text', text: /^0 issues · 0 PRs/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /^0 issues$/ })).toBeDefined()
   expect(await band.find({ type: 'Text', text: /PR #|CI|no checks/ })).toBeUndefined()
   await band.unmount()
 })
