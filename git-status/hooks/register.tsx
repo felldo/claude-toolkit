@@ -14,7 +14,6 @@ import {
   parsePorcelain,
   checkTime,
   ciChange,
-  formatDuration,
   mergeSummary,
   parseGhResponse,
   pullDetailsOf,
@@ -243,24 +242,34 @@ async function searchMine($: EngineInterface, repo: string, terms: string): Prom
   }
 }
 
-/** The newest release, else the newest tag, and how many commits `sha` is past it. */
-async function readRelease($: EngineInterface, repo: string, sha: string | null): Promise<Release | null> {
-  let release: Release | null = null
+/** The newest published release, or null when there is none. */
+async function readLatestRelease($: EngineInterface, repo: string): Promise<Release | null> {
   try {
     const { body } = await ghGet<{ tag_name: string; published_at: string | null; html_url: string }>($, `/repos/${repo}/releases/latest`)
-    if (!body.tag_name) throw new GitHubError('no release')
-    release = { tag: body.tag_name, isRelease: true, publishedAt: body.published_at, url: body.html_url, commitsSince: null }
+    if (!body.tag_name) return null
+
+    return { tag: body.tag_name, isRelease: true, publishedAt: body.published_at, url: body.html_url, commitsSince: null }
   } catch {
-    try {
-      const { body } = await ghGet<{ name: string }[]>($, `/repos/${repo}/tags?per_page=1`)
-      const tag = body[0]
-      if (tag) {
-        release = { tag: tag.name, isRelease: false, publishedAt: null, url: `https://github.com/${repo}/tree/${encodeURIComponent(tag.name)}`, commitsSince: null }
-      }
-    } catch {
-      // no tags either
-    }
+    return null
   }
+}
+
+/** The newest tag, or null when there is none. */
+async function readNewestTag($: EngineInterface, repo: string): Promise<Release | null> {
+  try {
+    const { body } = await ghGet<{ name: string }[]>($, `/repos/${repo}/tags?per_page=1`)
+    const tag = body[0]
+    if (!tag) return null
+
+    return { tag: tag.name, isRelease: false, publishedAt: null, url: `https://github.com/${repo}/tree/${encodeURIComponent(tag.name)}`, commitsSince: null }
+  } catch {
+    return null
+  }
+}
+
+/** The newest release, else the newest tag, and how many commits `sha` is past it. */
+async function readRelease($: EngineInterface, repo: string, sha: string | null): Promise<Release | null> {
+  const release = (await readLatestRelease($, repo)) ?? (await readNewestTag($, repo))
   if (release && sha) {
     try {
       const { body } = await ghGet<{ ahead_by: number }>($, `/repos/${repo}/compare/${encodeURIComponent(release.tag)}...${sha}`)
