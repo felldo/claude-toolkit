@@ -275,8 +275,7 @@ test('the pane shows branch, PR, pipeline, tests, deployments, issues and PRs', 
     const band = await $.ui.mount({ ...BAND, surface })
     for (const text of [
       /^⎇ feature\/x → origin\/feature\/x ↑1 · ●0 ✚0 \?1 · 1111111 add the thing/,
-      /^PR #12 Add pane → main · ✗ changes requested by ann · ✗ conflicts with main · \+120 −45 · 2 open threads$/,
-      /^CI ● running 1\/2 \(1 running\) · Tests 128✓ 0✗ 2 skipped · preview: success$/,
+      /^PR #12 Add pane → main · ✗ changes requested by ann · ✗ conflicts with main · \+120 −45 · 2 open threads · CI ● 1\/2 · Tests 128✓ 0✗ · preview: success$/,
       /^5 issues · 4 PRs · 1 assigned to you · 1 reviews for you · v1\.4\.0 \+3 commits$/,
     ]) {
       expect(await band.find({ type: 'Text', text })).toBeDefined()
@@ -341,6 +340,7 @@ test('a gh that is not logged in says so', async ($, on) => {
 
 test('empty sections still show their tables', async ($, on) => {
   mock.clock(on)
+  on('ui.render', { component: 'AbovePrompt' }, async () => h('Box', null) as RenderElement)
   on('process.run', async (_$, e) => {
     if (e.argv[0] === 'git') return ran(0, GIT[e.argv[1] ?? ''] ?? '')
     if (e.argv[1] === 'auth') return ran(0, '')
@@ -352,9 +352,17 @@ test('empty sections still show their tables', async ($, on) => {
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'refresh' })
-  for (const text of [/^Environment$/, /^No deployments\.$/, /^No open pull requests\.$/, /^No open issues\.$/, /^No checks on 0000000\.$/, /^Check$/]) {
+  for (const text of [/^Environment$/, /^No deployments\.$/, /^No open pull requests\.$/, /^No open issues\.$/, /^Nothing assigned to you\.$/]) {
     expect(await ui.find({ type: 'Text', text })).toBeDefined()
   }
   expect((await ui.findAll({ type: 'Text', text: /^Author$/ })).length).toBe(4)
+  // no PR on this branch: no pipeline
+  expect(await ui.find({ type: 'Text', text: /^Pipeline$/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^Check$/ })).toBeUndefined()
   await ui.unmount()
+
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /^0 issues · 0 PRs/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /PR #|CI|no checks/ })).toBeUndefined()
+  await band.unmount()
 })
