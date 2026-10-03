@@ -299,14 +299,14 @@ async function readRemote(
     }
   }
 
-  const sha = pr?.headSha ?? local?.pushedSha ?? null
+  const sha = pr?.headSha ?? null
   const [pipeline, deployments, details, assigned, reviewRequests, release] = await Promise.all([
     sha ? readPipeline($, repo, sha) : Promise.resolve(null),
     readDeployments($, repo, sha),
     pr ? readPullDetails($, repo, pr.number) : Promise.resolve(null),
     searchMine($, repo, 'assignee:@me'),
     searchMine($, repo, 'is:pr review-requested:@me'),
-    readRelease($, repo, sha ?? local?.sha ?? null),
+    readRelease($, repo, sha ?? local?.pushedSha ?? null),
   ])
   if (pr) pr.details = details
 
@@ -479,69 +479,68 @@ async function drawOverview($: EngineInterface, e: RenderInput<'AbovePrompt'>, l
   const merge = details && pr ? mergeSummary(details, pr.base) : null
   const failed = pipeline?.checks.filter(check => check.state === 'failed').map(check => check.name) ?? []
   const word = pipeline ? verdict(pipeline) : 'none'
-  const deployment = remote.deployments[0]
+  const deployment = remote.deployments.find(one => one.isThisCommit)
 
   return (
     <Box flexDirection="column">
       {branchLine}
-      <Text wrap="truncate-end">
-        {pr ? (
-          <Text>
-            <Text bold>PR #{pr.number}</Text> {pr.title}
-            {pr.isDraft ? <Text dimColor> (draft)</Text> : null}
-            <Text dimColor> → {pr.base}</Text>
-            {review ? (
-              <Text>
-                {dot}
-                <Text color={review.color}>{review.text}</Text>
-              </Text>
-            ) : null}
-            {merge ? (
-              <Text>
-                {dot}
-                <Text color={merge.color}>{merge.text}</Text>
-              </Text>
-            ) : null}
-            {details ? (
-              <Text>
-                {dot}
-                <Text color="green">+{details.additions}</Text> <Text color="red">−{details.deletions}</Text>
-                {details.unresolvedThreads ? <Text color="yellow"> · {details.unresolvedThreads} open threads</Text> : null}
-              </Text>
-            ) : null}
-          </Text>
-        ) : (
-          <Text dimColor>No open PR for this branch</Text>
-        )}
-      </Text>
-      <Text wrap="truncate-end">
-        {!pipeline || word === 'none' ? (
-          <Text dimColor>CI: no checks</Text>
-        ) : (
-          <Text>
-            <Text color={word === 'failed' ? 'red' : word === 'running' ? 'yellow' : 'green'}>
-              CI {word === 'failed' ? '✗ failed' : word === 'running' ? '● running' : '✓ passed'} {pipeline.passed}/{pipeline.total}
+      {pr && (
+        <Text wrap="truncate-end">
+          <Text bold>PR #{pr.number}</Text> {pr.title}
+          {pr.isDraft ? <Text dimColor> (draft)</Text> : null}
+          <Text dimColor> → {pr.base}</Text>
+          {review ? (
+            <Text>
+              {dot}
+              <Text color={review.color}>{review.text}</Text>
             </Text>
-            {pipeline.running + pipeline.queued ? <Text color="yellow"> ({pipeline.running + pipeline.queued} running)</Text> : null}
-            {failed.length ? <Text color="red"> · ✗ {failed.slice(0, 3).join(', ')}{failed.length > 3 ? ` +${failed.length - 3}` : ''}</Text> : null}
-            {pipeline.tests ? (
-              <Text>
-                {dot}Tests <Text color="green">{pipeline.tests.passed}✓</Text>{' '}
-                <Text color={pipeline.tests.failed ? 'red' : undefined} dimColor={!pipeline.tests.failed}>
-                  {pipeline.tests.failed}✗
-                </Text>
-                {pipeline.tests.skipped ? <Text dimColor> {pipeline.tests.skipped} skipped</Text> : null}
+          ) : null}
+          {merge ? (
+            <Text>
+              {dot}
+              <Text color={merge.color}>{merge.text}</Text>
+            </Text>
+          ) : null}
+          {details ? (
+            <Text>
+              {dot}
+              <Text color="green">+{details.additions}</Text> <Text color="red">−{details.deletions}</Text>
+              {details.unresolvedThreads ? <Text color="yellow"> · {details.unresolvedThreads} open threads</Text> : null}
+            </Text>
+          ) : null}
+          {dot}
+          {!pipeline || word === 'none' ? (
+            <Text dimColor>no checks</Text>
+          ) : (
+            <Text>
+              <Text color={word === 'failed' ? 'red' : word === 'running' ? 'yellow' : 'green'}>
+                CI {word === 'failed' ? '✗' : word === 'running' ? '●' : '✓'} {pipeline.passed}/{pipeline.total}
               </Text>
-            ) : null}
-          </Text>
-        )}
-        {deployment ? (
-          <Text>
-            {dot}
-            {deployment.environment}: <Text color={DEPLOY_COLOR[deployment.state]}>{deployment.state}</Text>
-          </Text>
-        ) : null}
-      </Text>
+              {failed.length ? (
+                <Text color="red">
+                  {' '}
+                  ✗ {failed.slice(0, 3).join(', ')}
+                  {failed.length > 3 ? ` +${failed.length - 3}` : ''}
+                </Text>
+              ) : null}
+              {pipeline.tests ? (
+                <Text>
+                  {dot}Tests <Text color="green">{pipeline.tests.passed}✓</Text>{' '}
+                  <Text color={pipeline.tests.failed ? 'red' : undefined} dimColor={!pipeline.tests.failed}>
+                    {pipeline.tests.failed}✗
+                  </Text>
+                </Text>
+              ) : null}
+            </Text>
+          )}
+          {deployment ? (
+            <Text>
+              {dot}
+              {deployment.environment}: <Text color={DEPLOY_COLOR[deployment.state]}>{deployment.state}</Text>
+            </Text>
+          ) : null}
+        </Text>
+      )}
       <Text wrap="truncate-end">
         <Text>{remote.openIssues ?? '?'} issues</Text>
         {dot}
@@ -702,9 +701,8 @@ async function drawDetails($: EngineInterface, e: RenderEvent, columns: number) 
             <Text dimColor>No open PR for this branch.</Text>
           )}
 
-          {heading(remote.pr ? 'Pipeline (PR head)' : 'Pipeline (last push)')}
-          {!remote.pipeline && <Text dimColor>No pushed commit to check.</Text>}
-          {remote.pipeline && (
+          {remote.pr && heading('Pipeline')}
+          {remote.pr && remote.pipeline && (
             <Box flexDirection="column">
               <Text>
                 <Text color="green">✓{remote.pipeline.passed} </Text>
