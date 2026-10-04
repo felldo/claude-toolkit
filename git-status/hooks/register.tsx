@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderElement, RenderInput } from 'claude-code'
+import type { EngineInterface, Register, RenderInput } from 'claude-code'
 
 type RenderEvent = RenderInput<'Pane' | 'AbovePrompt'>
 
@@ -22,8 +22,21 @@ import {
   parseRemote,
   intervalLabel,
   nextInterval,
-  verdict,
 } from './parse'
+import type { Said } from './parse'
+import {
+  LOOK,
+  blockers,
+  checklist,
+  fitBlockers,
+  fitSegments,
+  groupChecks,
+  overallState,
+  reviewTally,
+  reviewersOf,
+  widthOf,
+} from './overview'
+import type { Reviewer, Segment, Step, View } from './overview'
 
 const PANE = 'git-status'
 const LOCAL_EVERY_MS = 15_000
@@ -192,7 +205,7 @@ const PULL_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
     pullRequest(number: $number) {
       reviewDecision mergeable mergeStateStatus additions deletions changedFiles
       reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } ... on Team { name } ... on Bot { login } } } }
-      latestReviews(first: 20) { nodes { author { login } state } }
+      latestReviews(first: 20) { nodes { author { login } state comments { totalCount } } }
       reviewThreads(first: 100) { nodes { isResolved } }
     }
   }
@@ -230,15 +243,16 @@ async function readPullDetails($: EngineInterface, repo: string, number: number)
   }
 }
 
-/** Open issues and PRs of the repository a search finds for the person gh is logged in as. */
-async function searchMine($: EngineInterface, repo: string, terms: string): Promise<Item[]> {
+/** The first open issues and PRs a search finds for the person gh is logged in as, and how many it found in all. */
+async function searchMine($: EngineInterface, repo: string, terms: string): Promise<{ items: Item[]; total: number | null }> {
   const q = encodeURIComponent(`repo:${repo} is:open ${terms}`)
   try {
-    const { body } = await ghGet<{ items: RawIssue[] }>($, `/search/issues?q=${q}&per_page=${LISTED}&sort=updated`)
+    const { body } = await ghGet<{ total_count?: number; items: RawIssue[] }>($, `/search/issues?q=${q}&per_page=${LISTED}&sort=updated`)
+    const items = body.items.map(itemOf)
 
-    return body.items.map(itemOf)
+    return { items, total: body.total_count ?? items.length }
   } catch {
-    return []
+    return { items: [], total: null }
   }
 }
 
@@ -326,8 +340,10 @@ async function readRemote(
     issues: issues.slice(0, LISTED).map(itemOf),
     pulls: pulls.slice(0, LISTED).map(itemOf),
     pr,
-    assigned,
-    reviewRequests,
+    assigned: assigned.items,
+    reviewRequests: reviewRequests.items,
+    assignedCount: assigned.total,
+    reviewRequestCount: reviewRequests.total,
     release,
     pipeline,
     deployments,
@@ -435,185 +451,328 @@ async function cycleInterval($: EngineInterface) {
 }
 
 
-/** The band above the prompt: a few colored lines on branch, PR, pipeline and repository, with the toggle for the details. */
-async function drawOverview(
-  $: EngineInterface,
-  e: RenderInput<'AbovePrompt'>,
-  local: LocalStatus,
-  remote: Remote | null,
-  isExpanded: boolean,
-  width: number,
-) {
-  const { Box, Text, Button } = $.ui.resolve(e)
-  const pr = remote?.pr ?? null
-  const details = pr?.details ?? null
-  const pipeline = remote?.pipeline ?? null
-  const dot = <Text dimColor> · </Text>
-  const toggle = <Button key="git-details" label={isExpanded ? 'Less' : 'Git'} onPress={() => update($, expanded, is => !is)} />
-  const rule = <Text dimColor>{'─'.repeat(Math.max(0, width))}</Text>
-  /** A colored tag in a fixed column, so the lines start aligned. */
-  const label = (text: string, color: string) => (
-    <Box width={8} flexShrink={0}>
-      <Text bold color={color}>
-        {text}
-      </Text>
-    </Box>
-  )
+/** How many are assigned to and await a review from you; a snapshot from before the counts has its lists alone. */
+const assignedCount = (remote: Remote) => remote.assignedCount ?? remote.assigned.length
+const reviewRequestCount = (remote: Remote) => remote.reviewRequestCount ?? remote.reviewRequests.length
 
-  /**
-   * Pieces side by side after the label; a piece that no longer fits moves whole
-   * to the next line instead of being cut, and only one wider than the line is shortened.
-   */
-  const flow = (pieces: (RenderElement | null | undefined | false | 0 | '')[]) => {
-    const shown = pieces.filter(piece => !!piece)
-    return (
-      <Box flexWrap="wrap" flexGrow={1} flexShrink={1}>
-        {shown.map((piece, index) => (
-          <Box flexShrink={1}>
-            <Text wrap="truncate-end">
-              {index > 0 ? dot : null}
-              {piece}
-            </Text>
-          </Box>
-        ))}
-      </Box>
-    )
-  }
+const viewOf = (local: LocalStatus, remote: Remote | null): View => ({
+  local,
+  pr: remote?.pr ?? null,
+  pipeline: remote?.pr ? remote.pipeline : null,
+  deployments: remote?.deployments ?? [],
+})
 
-  const branchLine = (
-    <Box>
-      {label('BRANCH', 'magenta')}
-      {flow([
-        <Text>
-          ⎇ <Text bold>{local.branch ?? `detached ${local.sha?.slice(0, 7) ?? ''}`}</Text>
-          {local.upstream ? <Text dimColor> → {local.upstream}</Text> : <Text dimColor> (not pushed)</Text>}
-          {local.ahead ? <Text color="yellow"> ↑{local.ahead}</Text> : null}
-          {local.behind ? <Text color="yellow"> ↓{local.behind}</Text> : null}
-        </Text>,
-        <Text>
-          <Text color={local.staged ? 'green' : undefined} dimColor={!local.staged}>
-            ●{local.staged}
-          </Text>{' '}
-          <Text color={local.modified ? 'yellow' : undefined} dimColor={!local.modified}>
-            ✚{local.modified}
-          </Text>{' '}
-          <Text dimColor>?{local.untracked}</Text>
-          {local.conflicted ? <Text color="red"> ✗{local.conflicted} conflicts</Text> : null}
-        </Text>,
-        local.lastCommit && (
-          <Text dimColor>
-            {local.sha?.slice(0, 7)} {local.lastCommit}
-          </Text>
-        ),
-      ])}
-      <Box flexShrink={0} paddingLeft={1}>
-        {toggle}
-      </Box>
-    </Box>
-  )
-  if (!remote) return branchLine
-  if (isExpanded) {
-    return (
-      <Box flexDirection="column">
-        {branchLine}
-        {rule}
-      </Box>
-    )
-  }
+/** Room the toggle takes at the end of the first line: `[ Less ]` and its gap. */
+const TOGGLE = 9
+const REVIEWS_LISTED = 5
+const ASSIGNED_LISTED = 3
+const GROUPS_LISTED = 8
 
-  if (remote.error || !remote.repo) {
-    return (
-      <Box flexDirection="column">
-        {branchLine}
-        {rule}
-        <Box>
-          {label('GITHUB', remote.error ? 'red' : 'gray')}
-          <Text color={remote.error ? 'red' : undefined} dimColor={!remote.error} wrap="wrap">
-            {remote.error ?? 'No GitHub remote (set the repo option to choose one).'}
+/** Segments in a row, a dim dot between them; each segment one Text, so a test finds it whole. */
+function drawSegments($: EngineInterface, e: RenderInput<'AbovePrompt'>, segments: Said[][], gap: string) {
+  const { Box, Text } = $.ui.resolve(e)
+
+  return (
+    <Box flexShrink={1}>
+      {segments.map((parts, index) => (
+        <Box flexShrink={index === 0 ? 1 : 0}>
+          {index > 0 ? <Text dimColor>{gap}</Text> : null}
+          <Text wrap="truncate-end">
+            {parts.map(part => (
+              <Text color={part.color}>{part.text}</Text>
+            ))}
           </Text>
         </Box>
+      ))}
+    </Box>
+  )
+}
+
+const counted = (n: number | null, what: string, mine: number, label: string): Said[] => [
+  { text: `${n ?? '?'} ${what}` },
+  ...(mine > 0 ? [{ text: ` (${mine} ${label})`, color: 'cyan' }] : []),
+]
+
+/** Branch, working tree, PR and what the repository holds for you, as segments to fit a line. */
+function overviewSegments(local: LocalStatus, remote: Remote | null, isCalm: boolean): Segment[] {
+  const pr = remote?.pr ?? null
+  const pipeline = pr ? (remote?.pipeline ?? null) : null
+  const segments: Segment[] = [
+    {
+      priority: 0,
+      parts: [
+        { text: `⎇ ${local.branch ?? `detached ${local.sha?.slice(0, 7) ?? ''}`}` },
+        { text: local.upstream ? ` → ${local.upstream}` : ' (not pushed)', color: 'gray' },
+        ...(local.ahead ? [{ text: ` ↑${local.ahead}`, color: 'yellow' }] : []),
+        ...(local.behind ? [{ text: ` ↓${local.behind}`, color: 'yellow' }] : []),
+      ],
+      short: [{ text: `⎇ ${local.branch ?? local.sha?.slice(0, 7) ?? ''}` }],
+    },
+  ]
+  const isTouched = local.staged + local.modified + local.untracked + local.conflicted > 0
+  if (!isCalm || local.untracked) {
+    segments.push({
+      priority: 2,
+      parts: isTouched
+        ? [
+            { text: `●${local.staged}`, color: local.staged ? 'green' : 'gray' },
+            { text: ` ✚${local.modified}`, color: local.modified ? 'yellow' : 'gray' },
+            { text: ` ?${local.untracked}`, color: 'gray' },
+          ]
+        : [{ text: 'clean', color: 'gray' }],
+    })
+  }
+  if (pr) {
+    segments.push({
+      priority: 1,
+      parts: [{ text: `#${pr.number} ${pr.title}` }, { text: ` → ${pr.base}`, color: 'gray' }],
+      short: [{ text: `#${pr.number}` }],
+    })
+  }
+  if (isCalm && pipeline && pipeline.total > 0) {
+    segments.push({ priority: 0, parts: [{ text: `CI ✓ ${pipeline.passed}/${pipeline.total}`, color: 'green' }], short: [{ text: '✓', color: 'green' }] })
+  }
+  if (isCalm && pr?.details?.reviewDecision === 'APPROVED') {
+    segments.push({ priority: 2, parts: [{ text: '✓ approved', color: 'green' }] })
+  }
+  if (remote?.repo && !remote.error) {
+    segments.push({ priority: 3, parts: counted(remote.openIssues, 'issues', assignedCount(remote), 'assigned') })
+    segments.push({ priority: 3, parts: counted(remote.openPulls, 'PRs', reviewRequestCount(remote), 'to review') })
+    if (remote.release) {
+      segments.push({
+        priority: 4,
+        parts: [{ text: remote.release.tag }, ...(remote.release.commitsSince ? [{ text: ` +${remote.release.commitsSince}`, color: 'gray' }] : [])],
+      })
+    }
+  }
+  if (local.lastCommit) segments.push({ priority: 5, parts: [{ text: `${local.sha?.slice(0, 7)} ${local.lastCommit}`, color: 'gray' }] })
+
+  return segments
+}
+
+/**
+ * The band above the prompt: a badge with the verdict, then, when calm, one line of what matters most;
+ * otherwise the blockers, and a second line with branch, working tree and the repository's counts.
+ */
+function drawBand($: EngineInterface, e: RenderInput<'AbovePrompt'>, local: LocalStatus, remote: Remote | null, isExpanded: boolean, width: number) {
+  const { Box, Text, Button } = $.ui.resolve(e)
+  const state = overallState(viewOf(local, remote))
+  const look = LOOK[state]
+  const badge = ` ${look.mark} ${state} `
+  const room = Math.max(0, width - TOGGLE - widthOf(badge) - 1)
+  const toggle = <Button key="git-details" label={isExpanded ? 'Less' : 'Git'} onPress={() => update($, expanded, is => !is)} />
+
+  let first
+  if (look.isCalm) {
+    const fitted = fitSegments(overviewSegments(local, remote, true), room, 3)
+    first = (
+      <Box flexShrink={1}>
+        {drawSegments($, e, fitted.segments, ' · ')}
+        {fitted.hidden ? <Text color="yellow"> +{fitted.hidden}</Text> : null}
+      </Box>
+    )
+  } else {
+    const view = viewOf(local, remote)
+    const fitted = fitBlockers(blockers(view, false), blockers(view, true), room)
+    first = (
+      <Box flexShrink={1}>
+        {drawSegments($, e, fitted.shown.map(said => [said]), '  ')}
+        {fitted.hidden ? <Text dimColor>{fitted.shown.length ? '  ' : ''}+{fitted.hidden}</Text> : null}
       </Box>
     )
   }
 
-  const review = details ? reviewSummary(details) : null
-  const merge = details && pr ? mergeSummary(details, pr.base) : null
-  const failed = pipeline?.checks.filter(check => check.state === 'failed').map(check => check.name) ?? []
-  const word = pipeline ? verdict(pipeline) : 'none'
-  const deployment = remote.deployments.find(one => one.isThisCommit)
+  const problem = remote && (remote.error || !remote.repo) ? (remote.error ?? 'No GitHub remote (set the repo option to choose one).') : null
 
   return (
     <Box flexDirection="column">
-      {branchLine}
-      {rule}
-      {pr && (
-        <Box>
-          {label('PR', 'blue')}
-          {flow([
-            <Text>
-              <Text bold>#{pr.number}</Text> {pr.title}
-              {pr.isDraft ? <Text dimColor> (draft)</Text> : null}
-              <Text dimColor> → {pr.base}</Text>
-            </Text>,
-            review && <Text color={review.color}>{review.text}</Text>,
-            merge && <Text color={merge.color}>{merge.text}</Text>,
-            details && (
-              <Text>
-                <Text color="green">+{details.additions}</Text> <Text color="red">−{details.deletions}</Text>
-              </Text>
-            ),
-            details?.unresolvedThreads ? <Text color="yellow">{details.unresolvedThreads} open threads</Text> : null,
-            !pipeline || word === 'none' ? (
-              <Text dimColor>no checks</Text>
-            ) : (
-              <Text>
-                <Text bold color="black" backgroundColor={word === 'failed' ? 'red' : word === 'running' ? 'yellow' : 'green'}>
-                  {' '}CI {word === 'failed' ? '✗' : word === 'running' ? '●' : '✓'} {pipeline.passed}/{pipeline.total}{' '}
-                </Text>
-                {failed.length ? (
-                  <Text color="red">
-                    {' '}
-                    ✗ {failed.slice(0, 3).join(', ')}
-                    {failed.length > 3 ? ` +${failed.length - 3}` : ''}
-                  </Text>
-                ) : null}
-              </Text>
-            ),
-            pipeline?.tests && (
-              <Text>
-                Tests <Text color="green">{pipeline.tests.passed}✓</Text>{' '}
-                <Text color={pipeline.tests.failed ? 'red' : undefined} dimColor={!pipeline.tests.failed}>
-                  {pipeline.tests.failed}✗
-                </Text>
-              </Text>
-            ),
-            deployment && (
-              <Text>
-                {deployment.environment}: <Text color={DEPLOY_COLOR[deployment.state]}>{deployment.state}</Text>
-              </Text>
-            ),
-          ])}
-        </Box>
-      )}
-      {pr && rule}
       <Box>
-        {label('REPO', 'cyan')}
-        {flow([
-          <Text>{remote.openIssues ?? '?'} issues</Text>,
-          <Text>{remote.openPulls ?? '?'} PRs</Text>,
-          <Text color={remote.assigned.length ? 'cyan' : undefined} dimColor={!remote.assigned.length}>
-            {remote.assigned.length} assigned to you
-          </Text>,
-          <Text color={remote.reviewRequests.length ? 'yellow' : undefined} dimColor={!remote.reviewRequests.length}>
-            {remote.reviewRequests.length} reviews for you
-          </Text>,
-          remote.release && (
-            <Text>
-              {remote.release.tag}
-              <Text dimColor>{remote.release.commitsSince ? ` +${remote.release.commitsSince} commits` : ''}</Text>
+        <Box flexShrink={0} paddingRight={1}>
+          <Text bold color="black" backgroundColor={look.color}>
+            {badge}
+          </Text>
+        </Box>
+        <Box flexGrow={1} flexShrink={1}>
+          {first}
+        </Box>
+        <Box flexShrink={0} paddingLeft={1}>
+          {toggle}
+        </Box>
+      </Box>
+      {look.isCalm ? null : drawSegments($, e, fitSegments(overviewSegments(local, remote, false), width, 3).segments, ' · ')}
+      {problem && (
+        <Text color={remote?.error ? 'red' : undefined} dimColor={!remote?.error} wrap="wrap">
+          {problem}
+        </Text>
+      )}
+    </Box>
+  )
+}
+
+const STEP_LOOK: Record<Step['state'], { mark: string; color: string }> = {
+  done: { mark: '✓', color: 'green' },
+  failed: { mark: '✗', color: 'red' },
+  warning: { mark: '!', color: 'yellow' },
+  waiting: { mark: '○', color: 'yellow' },
+  todo: { mark: '·', color: 'gray' },
+}
+
+const REVIEWER_LOOK: Record<Reviewer['state'], { mark: string; color: string | undefined }> = {
+  approved: { mark: '✓', color: 'green' },
+  changes: { mark: '✗', color: 'red' },
+  commented: { mark: '●', color: undefined },
+  pending: { mark: '○', color: 'yellow' },
+}
+
+/** The band opened: the merge checklist, the reviewers, the checks not done, what waits for you, and the controls. */
+async function drawExpanded($: EngineInterface, e: RenderInput<'AbovePrompt'>, local: LocalStatus, remote: Remote | null, width: number) {
+  const { Box, Text, Button, Link } = $.ui.resolve(e)
+  const { updatedAt, isRefreshing } = await read($, snapshot)
+  const now = await $.clock.now()
+  const ago = updatedAt ? Math.round((now - updatedAt) / 1000) : null
+  const view = viewOf(local, remote)
+  const list = checklist(view)
+  const pr = view.pr
+  const reviewers = pr?.details ? reviewersOf(pr.details) : []
+  const open = view.pipeline ? groupChecks(view.pipeline.checks.filter(check => /^(failed|running|queued)$/.test(check.state))) : []
+  const nameWidth = Math.min(28, Math.max(12, Math.floor(width / 4)))
+
+  const heading = (text: string, extra?: string) => (
+    <Box>
+      <Text bold color="cyan">
+        {text}
+      </Text>
+      {extra ? <Text dimColor> {extra}</Text> : null}
+    </Box>
+  )
+  const mark = (text: string, color?: string) => (
+    <Box width={2} flexShrink={0}>
+      <Text color={color}>{text}</Text>
+    </Box>
+  )
+  const more = (n: number) => (n > 0 ? <Text dimColor>… {n} more</Text> : null)
+  const itemRow = (item: Item) => (
+    <Box>
+      <Box width={7} flexShrink={0}>
+        {item.url ? (
+          <Link href={item.url}>
+            <Text color="blue">#{item.number}</Text>
+          </Link>
+        ) : (
+          <Text dimColor>#{item.number}</Text>
+        )}
+      </Box>
+      <Box flexGrow={1} flexShrink={1}>
+        <Text wrap="truncate-end">{item.title}</Text>
+      </Box>
+      <Box flexShrink={0} paddingLeft={1}>
+        <Text dimColor>{item.author}</Text>
+      </Box>
+    </Box>
+  )
+
+  const tally = reviewTally(reviewers)
+  const tallyText = [
+    tally.approved && `${tally.approved} approved`,
+    tally.changes && `${tally.changes} changes`,
+    tally.commented && `${tally.commented} commented`,
+    tally.pending && `${tally.pending} pending`,
+  ]
+    .filter(Boolean)
+    .join(' · ')
+
+  const reviews = remote?.reviewRequests ?? []
+  const assigned = remote?.assigned ?? []
+  const reviewTotal = remote ? reviewRequestCount(remote) : 0
+  const assignedTotal = remote ? assignedCount(remote) : 0
+
+  return (
+    <Box flexDirection="column">
+      <Text dimColor>{'─'.repeat(Math.max(0, width))}</Text>
+
+      {heading(list.title)}
+      {list.items.map(item => (
+        <Box>
+          {mark(STEP_LOOK[item.state].mark, STEP_LOOK[item.state].color)}
+          <Box flexGrow={1} flexShrink={1}>
+            <Text wrap="truncate-end">
+              <Text color={item.state === 'done' ? undefined : STEP_LOOK[item.state].color}>{item.text}</Text>
+              {item.detail ? <Text dimColor> {item.detail}</Text> : null}
             </Text>
-          ),
-        ])}
+          </Box>
+          {item.hint ? (
+            <Box flexShrink={0} paddingLeft={1}>
+              <Text dimColor>{item.hint}</Text>
+            </Box>
+          ) : null}
+        </Box>
+      ))}
+
+      {reviewers.length > 0 && heading('Reviewers', tallyText)}
+      {reviewers.map(reviewer => (
+        <Box>
+          {mark(REVIEWER_LOOK[reviewer.state].mark, REVIEWER_LOOK[reviewer.state].color)}
+          <Box width={nameWidth} flexShrink={0}>
+            <Text wrap="truncate-end">{reviewer.name}</Text>
+          </Box>
+          <Box width={11} flexShrink={0}>
+            <Text color={REVIEWER_LOOK[reviewer.state].color} dimColor={reviewer.state === 'commented'}>
+              {reviewer.state}
+            </Text>
+          </Box>
+          {reviewer.comments > 0 ? <Text dimColor>{reviewer.comments === 1 ? '1 comment' : `${reviewer.comments} comments`}</Text> : null}
+        </Box>
+      ))}
+
+      {open.length > 0 && view.pipeline && heading('Open checks', `${view.pipeline.total - view.pipeline.passed - view.pipeline.skipped} of ${view.pipeline.total}`)}
+      {open.slice(0, GROUPS_LISTED).map(group => {
+        const failedIn = group.checks.filter(check => check.state === 'failed')
+        const url = (failedIn[0] ?? group.checks[0])?.url
+
+        return (
+          <Box>
+            {mark(MARK[group.state], COLOR[group.state])}
+            <Box width={nameWidth} flexShrink={0}>
+              <Text wrap="truncate-end">{group.checks.length > 1 ? `${group.name} ×${group.checks.length}` : group.name}</Text>
+            </Box>
+            <Box width={9} flexShrink={0}>
+              <Text color={COLOR[group.state]}>{group.state}</Text>
+            </Box>
+            <Box flexGrow={1} flexShrink={1}>
+              <Text dimColor wrap="truncate-end">
+                {group.failedTests ? `${group.failedTests} tests failed` : group.variants.length > 1 ? group.variants.join(', ') : ''}
+              </Text>
+            </Box>
+            {url ? (
+              <Box flexShrink={0} paddingLeft={1}>
+                <Link href={url}>
+                  <Text color="blue">log ↗</Text>
+                </Link>
+              </Box>
+            ) : null}
+          </Box>
+        )
+      })}
+      {more(open.length - GROUPS_LISTED)}
+
+      {remote?.repo && heading('Waiting for you')}
+      {remote?.repo && reviewTotal === 0 && assignedTotal === 0 && <Text dimColor>Nothing to review or assigned to you.</Text>}
+      {reviewTotal > 0 && <Text dimColor>Reviews ({reviewTotal})</Text>}
+      {reviews.slice(0, REVIEWS_LISTED).map(itemRow)}
+      {reviewTotal > 0 && more(reviewTotal - Math.min(reviews.length, REVIEWS_LISTED))}
+      {assignedTotal > 0 && <Text dimColor>Assigned ({assignedTotal})</Text>}
+      {assigned.slice(0, ASSIGNED_LISTED).map(itemRow)}
+      {assignedTotal > 0 && more(assignedTotal - Math.min(assigned.length, ASSIGNED_LISTED))}
+
+      <Box flexWrap="wrap">
+        <Text dimColor>
+          {remote?.repo ? `${remote.repo} · ` : ''}
+          {remote?.release ? `${remote.release.tag}${remote.release.commitsSince ? ` +${remote.release.commitsSince}` : ''} · ` : ''}
+          {isRefreshing ? 'refreshing… ' : ago !== null ? `updated ${ago}s ago ` : 'loading… '}
+        </Text>
+        <Button key="refresh" label="Refresh" hotkey="r" onPress={() => refreshRemote($)} />
+        <Button key="auto" label={`Auto ${intervalLabel(await read($, interval))}`} hotkey="a" onPress={() => cycleInterval($)} />
+        {remote?.rateRemaining != null ? <Text dimColor> {remote.rateRemaining} API calls left</Text> : null}
       </Box>
     </Box>
   )
@@ -831,10 +990,10 @@ async function drawDetails($: EngineInterface, e: RenderEvent, columns: number) 
           {heading(`Open issues (${remote.openIssues ?? '?'})`)}
           {remote.issues.length > 0 && itemTable(remote.issues, 'No open issues.')}
 
-          {heading(`Assigned to you (${remote.assigned.length})`)}
+          {heading(`Assigned to you (${assignedCount(remote)})`)}
           {remote.assigned.length > 0 && itemTable(remote.assigned, 'Nothing assigned to you.')}
 
-          {heading(`Review requested from you (${remote.reviewRequests.length})`)}
+          {heading(`Review requested from you (${reviewRequestCount(remote)})`)}
           {remote.reviewRequests.length > 0 && itemTable(remote.reviewRequests, 'No reviews requested from you.')}
 
           {heading(remote.release ? 'Latest release' : 'Latest release (none)')}
@@ -924,15 +1083,14 @@ export const register: Register = (on, options) => {
     const { Box } = $.ui.resolve(e)
     const isExpanded = await read($, expanded)
     const inner = e.props.bodyColumns - 4
-    // the frame takes the PR's CI color, gray without a PR or checks
-    const word = remote?.pr && remote.pipeline ? verdict(remote.pipeline) : 'none'
-    const frame = word === 'failed' ? 'red' : word === 'running' ? 'yellow' : word === 'none' ? 'gray' : 'green'
+    // the frame takes the badge's color
+    const frame = LOOK[overallState(viewOf(local, remote))].color
 
     return (
       <Box flexDirection="column">
         <Box flexDirection="column" borderStyle="round" borderColor={frame} paddingX={1}>
-          {await drawOverview($, e, local, remote, isExpanded, inner)}
-          {isExpanded ? await drawDetails($, e, inner) : null}
+          {drawBand($, e, local, remote, isExpanded, inner)}
+          {isExpanded ? await drawExpanded($, e, local, remote, inner) : null}
         </Box>
         {below}
       </Box>
@@ -950,6 +1108,8 @@ function emptyRemote(repo: string | null): Remote {
     pr: null,
     assigned: [],
     reviewRequests: [],
+    assignedCount: null,
+    reviewRequestCount: null,
     release: null,
     pipeline: null,
     deployments: [],

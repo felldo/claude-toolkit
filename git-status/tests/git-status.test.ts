@@ -94,7 +94,9 @@ describe('parsing', () => {
       changedFiles: 0,
       unresolvedThreads: 0,
     }
-    expect(reviewSummary({ ...details, reviewDecision: 'APPROVED', reviews: [{ author: 'ann', state: 'APPROVED' }] }).text).toBe('✓ approved by ann')
+    expect(reviewSummary({ ...details, reviewDecision: 'APPROVED', reviews: [{ author: 'ann', state: 'APPROVED', comments: 0 }] }).text).toBe(
+      '✓ approved by ann',
+    )
     expect(reviewSummary({ ...details, requested: ['bob', 'team'] }).text).toBe('○ waiting for bob, team')
     expect(mergeSummary(details, 'main').text).toBe('✓ ready to merge')
     expect(mergeSummary({ ...details, mergeState: 'BEHIND' }, 'main').text).toBe('↓ behind main, update the branch')
@@ -164,15 +166,21 @@ const PULL = {
   deletions: 45,
   changedFiles: 8,
   reviewRequests: { nodes: [{ requestedReviewer: { login: 'dan' } }, { requestedReviewer: null }] },
-  latestReviews: { nodes: [{ author: { login: 'ann' }, state: 'CHANGES_REQUESTED' }] },
+  latestReviews: { nodes: [{ author: { login: 'ann' }, state: 'CHANGES_REQUESTED', comments: { totalCount: 3 } }] },
   reviewThreads: { nodes: [{ isResolved: false }, { isResolved: true }, { isResolved: false }] },
 }
 
 const GITHUB: [RegExp, unknown, Record<string, string>?][] = [
-  [/\/search\/issues\?q=.*assignee%3A%40me/, { items: [{ number: 9, title: 'Fix login', user: { login: 'me' }, html_url: 'https://github.com/acme/app/issues/9' }] }],
+  [
+    /\/search\/issues\?q=.*assignee%3A%40me/,
+    { total_count: 2, items: [{ number: 9, title: 'Fix login', user: { login: 'me' }, html_url: 'https://github.com/acme/app/issues/9' }] },
+  ],
   [
     /\/search\/issues\?q=.*review-requested%3A%40me/,
-    { items: [{ number: 20, title: 'Refactor store', user: { login: 'cat' }, pull_request: {}, html_url: 'https://github.com/acme/app/pull/20' }] },
+    {
+      total_count: 6,
+      items: [{ number: 20, title: 'Refactor store', user: { login: 'cat' }, pull_request: {}, html_url: 'https://github.com/acme/app/pull/20' }],
+    },
   ],
   [/\/releases\/latest$/, { tag_name: 'v1.4.0', published_at: '2026-09-20T08:00:00Z', html_url: 'https://github.com/acme/app/releases/tag/v1.4.0' }],
   [/\/compare\/v1\.4\.0\.\.\.cafe123$/, { ahead_by: 3 }],
@@ -258,8 +266,8 @@ test('the pane shows branch, PR, pipeline, tests, deployments, issues and PRs', 
       /^Time$/,
       /Fix login/,
       /PR Refactor store/,
-      /Assigned to you \(1\)/,
-      /Review requested from you \(1\)/,
+      /Assigned to you \(2\)/,
+      /Review requested from you \(6\)/,
       /3 commits since/,
       /^Author$/,
       /^ann$/,
@@ -276,34 +284,53 @@ test('the pane shows branch, PR, pipeline, tests, deployments, issues and PRs', 
   for (const surface of ['terminal', 'desktop'] as const) {
     const band = await $.ui.mount({ ...BAND, surface })
     for (const text of [
-      // each piece is drawn whole, so a narrow terminal moves it to the next line instead of cutting it
+      // the verdict, then the blockers: compact, as all of them in full do not fit 120 columns
+      /^ ↑ UNPUSHED $/,
+      /^↑1$/,
+      /^● CI 1\/2$/,
+      /^✗ changes ×1$/,
+      /^○ review ×1$/,
+      /^2 threads$/,
+      /^✗ merge conflict$/,
+      // then branch, working tree, PR and what the repository holds for you
       /^⎇ feature\/x → origin\/feature\/x ↑1$/,
-      /^ · ●0 ✚0 \?1$/,
-      /^ · 1111111 add the thing$/,
+      /^●0 ✚0 \?1$/,
       /^#12 Add pane → main$/,
-      /^ · ✗ changes requested by ann$/,
-      /^ · ✗ conflicts with main$/,
-      /^ · \+120 −45$/,
-      /^ · 2 open threads$/,
-      /^ · {2}CI ● 1\/2 $/,
-      /^ · Tests 128✓ 0✗$/,
-      /^ · preview: success$/,
-      /^5 issues$/,
-      /^ · 4 PRs$/,
-      /^ · 1 assigned to you$/,
-      /^ · 1 reviews for you$/,
-      /^ · v1\.4\.0 \+3 commits$/,
-      /^BRANCH$/,
-      /^PR$/,
-      /^REPO$/,
-      /^─+$/,
+      /^5 issues \(2 assigned\)$/,
+      /^4 PRs \(6 to review\)$/,
     ]) {
       expect(await band.find({ type: 'Text', text })).toBeDefined()
     }
-    expect(await band.find({ type: 'Text', text: /Crash on start/ })).toBeUndefined()
+    for (const text of [/Fix login/, /^To merge/, /^BRANCH$/]) {
+      expect(await band.find({ type: 'Text', text })).toBeUndefined()
+    }
     expect(await band.find({ key: 'auto' })).toBeUndefined()
     await band.press({ key: 'git-details' })
-    expect(await band.find({ type: 'Text', text: /Crash on start/ })).toBeDefined()
+    for (const text of [
+      // the checklist, each step worded for its state, with the command that fixes it
+      /^To merge #12 into main$/,
+      /^No local conflicts$/,
+      /^1 commit not pushed$/,
+      /^git push$/,
+      /^Conflicts with main$/,
+      /^git merge origin\/main$/,
+      /^Changes requested$/,
+      // the reviewers with their comments
+      /^ann$/,
+      /^3 comments$/,
+      /^dan$/,
+      // the checks not done yet
+      /^e2e$/,
+      // what waits for you: the first few and how many more
+      /Refactor store/,
+      /^… 5 more$/,
+      /Fix login/,
+      /^… 1 more$/,
+      /4990 API calls left/,
+    ]) {
+      expect(await band.find({ type: 'Text', text })).toBeDefined()
+    }
+    expect(await band.find({ type: 'Text', text: /^No open threads$|^Pushed$/ })).toBeUndefined()
     expect((await band.find({ key: 'auto' }))?.text).toBe('Auto 1m')
     await band.press({ key: 'auto' })
     expect((await band.find({ key: 'auto' }))?.text).toBe('Auto 5m')
@@ -393,5 +420,34 @@ test('empty sections keep their title, not their table', async ($, on) => {
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await band.find({ type: 'Text', text: /^0 issues$/ })).toBeDefined()
   expect(await band.find({ type: 'Text', text: /PR #|CI|no checks/ })).toBeUndefined()
+  await band.unmount()
+})
+
+test('a calm branch gets a short badge and one line of segments', async ($, on) => {
+  mock.clock(on)
+  on('ui.render', { component: 'AbovePrompt' }, async () => h('Box', null) as RenderElement)
+  on('process.run', async (_$, e) => {
+    if (e.argv[0] === 'git') {
+      const clean = '# branch.oid 1111111aaaa\n# branch.head feature/x\n# branch.upstream origin/feature/x\n# branch.ab +0 -0\n'
+
+      return ran(0, e.argv[1] === 'status' ? clean : (GIT[e.argv[1] ?? ''] ?? ''))
+    }
+    if (e.argv[1] === 'auth') return ran(0, '')
+    const path = e.argv[3] ?? ''
+    const body = /\/repos\/acme\/app$/.test(path) ? { open_issues_count: 3 } : /search/.test(path) ? { total_count: 0, items: [] } : []
+
+    return ran(0, `HTTP/2.0 200 OK\r\n\r\n${JSON.stringify(body)}`)
+  })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'refresh' })
+  await ui.unmount()
+
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  for (const text of [/^ ✓ CLEAN $/, /^⎇ feature\/x → origin\/feature\/x$/, /^3 issues$/, /^0 PRs$/]) {
+    expect(await band.find({ type: 'Text', text })).toBeDefined()
+  }
+  // one line: no second line with the branch again
+  expect((await band.findAll({ type: 'Text', text: /^⎇ feature\/x → / })).length).toBe(1)
   await band.unmount()
 })

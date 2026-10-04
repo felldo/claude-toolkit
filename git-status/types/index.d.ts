@@ -48,7 +48,8 @@ export type Deployment = {
   at: string
 }
 
-export type Review = { author: string; state: string }
+/** A reviewer's latest review; `comments` are that review's own. */
+export type Review = { author: string; state: string; comments: number }
 
 /** What GraphQL says about the PR beyond the REST list: reviews, merge state and size. */
 export type PullDetails = {
@@ -76,6 +77,9 @@ export type Remote = {
   pr: PullRequest | null
   assigned: Item[]
   reviewRequests: Item[]
+  /** All the search found; `assigned` and `reviewRequests` list only the first few. */
+  assignedCount: number | null
+  reviewRequestCount: number | null
   release: Release | null
   pipeline: Pipeline | null
   deployments: Deployment[]

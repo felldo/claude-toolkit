@@ -276,7 +276,7 @@ type GraphPull = {
   deletions: number
   changedFiles: number
   reviewRequests: { nodes: { requestedReviewer: { login?: string; name?: string } | null }[] }
-  latestReviews: { nodes: { author: { login: string } | null; state: string }[] }
+  latestReviews: { nodes: { author: { login: string } | null; state: string; comments?: { totalCount: number } }[] }
   reviewThreads: { nodes: { isResolved: boolean }[] }
 }
 
@@ -286,7 +286,11 @@ export function pullDetailsOf(pull: GraphPull): PullDetails {
     requested: pull.reviewRequests.nodes
       .map(node => node.requestedReviewer?.login ?? node.requestedReviewer?.name)
       .filter((name): name is string => Boolean(name)),
-    reviews: pull.latestReviews.nodes.map(node => ({ author: node.author?.login ?? '?', state: node.state })),
+    reviews: pull.latestReviews.nodes.map(node => ({
+      author: node.author?.login ?? '?',
+      state: node.state,
+      comments: node.comments?.totalCount ?? 0,
+    })),
     mergeable: pull.mergeable,
     mergeState: pull.mergeStateStatus,
     additions: pull.additions,
