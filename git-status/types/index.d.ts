@@ -96,6 +96,6 @@ export type Snapshot = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'git-status': { snapshot: Snapshot; isExpanded: boolean; intervalMs: number }
+    'git-status': { snapshot: Snapshot; isExpanded: boolean; intervalMs: number; isPaneOpen: boolean }
   }
 }

@@ -46,6 +46,8 @@ const TICK_MS = 5_000
 
 const expanded = atom({ plugin: 'git-status', key: 'isExpanded' } as const, false)
 const interval = atom({ plugin: 'git-status', key: 'intervalMs' } as const, 60_000)
+/** True while the Git pane is open; the desktop then leaves the band above the prompt out. */
+const paneOpen = atom({ plugin: 'git-status', key: 'isPaneOpen' } as const, false)
 
 const snapshot = atom({ plugin: 'git-status', key: 'snapshot' } as const, {
   local: null,
@@ -1042,13 +1044,14 @@ export const register: Register = (on, options) => {
     // a reload keeps the snapshot, so only a stale one is fetched again
     $.clock.after(0, () => void firstLoad($))
     $.clock.every(TICK_MS, () => void tick($))
-    void $.ui.open({ id: PANE, title: 'Git' })
+    void $.ui.open({ id: PANE, title: 'Git' }).then(opened => update($, paneOpen, () => opened.isPlaced))
 
     return next(e)
   })
 
   on('command.run', { command: 'git-status' }, async $ => {
     const opened = await $.ui.open({ id: PANE, title: 'Git', focus: true, rows: 24 })
+    await update($, paneOpen, () => opened.isPlaced)
     void refreshRemote($)
     if (!opened.isPlaced) return { text: `Git status pane waits: ${opened.reason}` }
 
@@ -1071,6 +1074,13 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  on('ui.close', async ($, e, next) => {
+    const result = await next(e)
+    if (e.id === PANE) await update($, paneOpen, () => false)
+
+    return result
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     return drawDetails($, e, e.props.bodyColumns)
   })
@@ -1079,6 +1089,8 @@ export const register: Register = (on, options) => {
     const below = await next(e)
     const { local, remote } = await read($, snapshot)
     if (e.props.hasSurvey || !local) return below
+    // the desktop shows the pane beside the chat: one place is enough
+    if (e.surface === 'desktop' && (await read($, paneOpen))) return below
 
     const { Box } = $.ui.resolve(e)
     const isExpanded = await read($, expanded)
