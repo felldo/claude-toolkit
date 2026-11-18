@@ -434,8 +434,23 @@ async function firstLoad($: EngineInterface) {
   if (updatedAt === 0) await refreshRemote($)
 }
 
+/** Whether the engine draws the Git pane now: its own record, not what an earlier open answered. */
+async function isPanePlaced($: EngineInterface) {
+  return (await $.ui.panes()).some(pane => pane.id === PANE && pane.isPlaced)
+}
+
+/**
+ * Copies the engine's record into `paneOpen`, so the band redraws when the pane gets or loses its seat:
+ * an open made before the desktop attached answers `isPlaced: false` and is seated later.
+ */
+async function syncPane($: EngineInterface) {
+  const isPlaced = await isPanePlaced($)
+  if ((await read($, paneOpen)) !== isPlaced) await update($, paneOpen, () => isPlaced)
+}
+
 /** One auto refresh step: the working tree at most every 15 s, GitHub once the interval is up. */
 async function tick($: EngineInterface) {
+  await syncPane($)
   const every = await read($, interval)
   if (every === 0) return
 
@@ -1044,14 +1059,29 @@ export const register: Register = (on, options) => {
     // a reload keeps the snapshot, so only a stale one is fetched again
     $.clock.after(0, () => void firstLoad($))
     $.clock.every(TICK_MS, () => void tick($))
-    void $.ui.open({ id: PANE, title: 'Git' }).then(opened => update($, paneOpen, () => opened.isPlaced))
+    void $.ui.open({ id: PANE, title: 'Git' }).then(() => syncPane($))
 
     return next(e)
   })
 
+  // the desktop app attaches after the session started: that is when it seats the pane
+  on('session.attach', async ($, e, next) => {
+    const result = await next(e)
+    await syncPane($)
+
+    return result
+  })
+
+  // an open of the pane by the person (the desktop's own pane menu) seats it as well
+  on('ui.open', async ($, e, next) => {
+    const result = await next(e)
+    if (e.id === PANE) await syncPane($)
+
+    return result
+  })
+
   on('command.run', { command: 'git-status' }, async $ => {
     const opened = await $.ui.open({ id: PANE, title: 'Git', focus: true, rows: 24 })
-    await update($, paneOpen, () => opened.isPlaced)
     void refreshRemote($)
     if (!opened.isPlaced) return { text: `Git status pane waits: ${opened.reason}` }
 
@@ -1090,7 +1120,11 @@ export const register: Register = (on, options) => {
     const { local, remote } = await read($, snapshot)
     if (e.props.hasSurvey || !local) return below
     // the desktop shows the pane beside the chat: one place is enough
-    if (e.surface === 'desktop' && (await read($, paneOpen))) return below
+    // (`paneOpen` is read to redraw on a change; the engine's record decides)
+    if (e.surface === 'desktop') {
+      await read($, paneOpen)
+      if (await isPanePlaced($)) return below
+    }
 
     const { Box } = $.ui.resolve(e)
     const isExpanded = await read($, expanded)

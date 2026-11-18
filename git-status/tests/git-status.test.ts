@@ -220,6 +220,8 @@ test('the pane shows branch, PR, pipeline, tests, deployments, issues and PRs', 
   mock.clock(on, { now: 1_000_000 })
   mock.store(on)
   on('ui.render', { component: 'AbovePrompt' }, async () => h('Box', null) as RenderElement)
+  // no pane seated: the desktop keeps the band too
+  on('ui.panes', async () => ({ value: [] }))
   const asked: string[] = []
 
   on('process.run', async (_$, e) => {
@@ -355,6 +357,33 @@ test('outside GitHub the pane says so', async ($, on) => {
   await ui.press({ key: 'refresh' })
   expect(await ui.find({ type: 'Text', text: /No GitHub remote/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('on the desktop the band steps aside while the pane is placed, even when it was placed after the open', async ($, on) => {
+  mock.clock(on)
+  on('ui.render', { component: 'AbovePrompt' }, async () => h('Box', null) as RenderElement)
+  on('process.run', async (_$, e) => ran(e.argv[0] === 'git' ? 0 : 1, e.argv[0] === 'git' ? GIT[e.argv[1] ?? ''] ?? '' : ''))
+  // the engine's record: the pane got its seat once the desktop attached, not at the open
+  let isPlaced = false
+  on('ui.panes', async () => ({ value: [{ id: 'git-status', title: 'Git', isShown: true, isFocused: false, isPlaced }] }))
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'refresh' })
+  await ui.unmount()
+
+  const before = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await before.find({ type: 'Text', text: /^⎇ feature\/x/ })).toBeDefined()
+  await before.unmount()
+
+  isPlaced = true
+  const desktop = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await desktop.find({ type: 'Text', text: /^⎇ feature\/x/ })).toBeUndefined()
+  await desktop.unmount()
+
+  // the terminal has no pane beside the chat: the band stays
+  const terminal = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await terminal.find({ type: 'Text', text: /^⎇ feature\/x/ })).toBeDefined()
+  await terminal.unmount()
 })
 
 test('without gh the band says how to get it', async ($, on) => {
